@@ -1,0 +1,25 @@
+name: Verify independent macOS runner
+
+# Manual trigger only: creating or pushing this file does not run any job.
+on:
+  workflow_dispatch:
+
+# Restrict the automatically supplied token. This test does not use it.
+permissions: {}
+
+jobs:
+  cloud-runner-smoke-test:
+    name: Verify GitHub-hosted Apple Silicon runner
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Confirm operating system and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Runner OS: ${RUNNER_OS}"
+          echo "Runner architecture: ${RUNNER_ARCH}"
+          test "${RUNNER_OS}" = "macOS"
+          test "${RUNNER_ARCH}" = "ARM64"
+          echo "PASS: GitHub-hosted macOS ARM64 runner is available."
+          echo "No checkout, private inputs, secrets, backup, restore or local Mac access."
