@@ -1,0 +1,74 @@
+name: macOS synthetic sandbox access probe
+
+# Automatically execute once when this workflow is created/edited.
+# This exercises only new temporary fixture files on a GitHub-hosted runner.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/macos-sandbox-fixture-probe.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sandbox-fixture:
+    name: Test OS-enforced fixture access and aliases
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Check sandbox availability and independent access controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = "macOS"
+          test "$RUNNER_ARCH" = "ARM64"
+          test -x /usr/bin/sandbox-exec
+
+          work="$(mktemp -d "$RUNNER_TEMP/ocw-sandbox-fixture-XXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          work="$(cd "$work" && pwd -P)"
+          protected="$work/forbidden-fixture"
+          mkdir -p "$protected"
+          printf 'fictional, not a credential\n' > "$protected/fixture.txt"
+          printf 'ordinary test file\n' > "$work/allowed.txt"
+          ln -s "$protected/fixture.txt" "$work/symlink-alias.txt"
+          ln "$protected/fixture.txt" "$work/hardlink-alias.txt"
+
+          printf '(version 1)\n(allow default)\n(deny file-read* (subpath "%s"))\n' "$protected" > "$work/fixture.sb"
+
+          # A successful sandboxed read outside the protected root is mandatory.
+          if ! /usr/bin/sandbox-exec -f "$work/fixture.sb" /bin/cat "$work/allowed.txt" >/dev/null; then
+            echo "SANDBOX_INIT_OR_ALLOWED_READ_FAIL: cannot claim any restricted-mode result"
+            exit 2
+          fi
+          echo "SANDBOX_INIT_AND_ALLOWED_CONTROL=PASS"
+
+          if /usr/bin/sandbox-exec -f "$work/fixture.sb" /bin/cat "$protected/fixture.txt" >/dev/null 2>&1; then
+            echo "DIRECT_PROTECTED_READ=FAIL_UNEXPECTEDLY_ALLOWED"
+            exit 1
+          fi
+          echo "DIRECT_PROTECTED_READ=BLOCKED"
+
+          if /usr/bin/sandbox-exec -f "$work/fixture.sb" /bin/ls "$protected" >/dev/null 2>&1; then
+            echo "PROTECTED_DIRECTORY_LIST=FAIL_UNEXPECTEDLY_ALLOWED"
+            exit 1
+          fi
+          echo "PROTECTED_DIRECTORY_LIST=BLOCKED"
+
+          if /usr/bin/sandbox-exec -f "$work/fixture.sb" /bin/cat "$work/symlink-alias.txt" >/dev/null 2>&1; then
+            echo "SYMLINK_ALIAS_READ=ALLOWED (path policy insufficient)"
+          else
+            echo "SYMLINK_ALIAS_READ=BLOCKED"
+          fi
+
+          # Hard links share bytes/inode but have an independent name. A pathname
+          # sandbox may legitimately allow this access. Informational, never a
+          # global no-contact proof or a production acceptance test.
+          if /usr/bin/sandbox-exec -f "$work/fixture.sb" /bin/cat "$work/hardlink-alias.txt" >/dev/null 2>&1; then
+            echo "HARDLINK_ALIAS_READ=ALLOWED (expected path-only limitation)"
+          else
+            echo "HARDLINK_ALIAS_READ=BLOCKED"
+          fi
+          echo "RESULT=PARTIAL_FIXTURE_VALIDATION_ONLY"
+          echo "NOT_VERIFIED: production isolation, protected archive, all hardlink identities, backup completeness"
