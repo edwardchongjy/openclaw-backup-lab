@@ -1,0 +1,81 @@
+name: OpenClaw upstream backup baseline
+
+# A change to this single workflow starts the first isolated baseline run.
+# Future runs can be triggered manually; no scheduled or production runs.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/openclaw-upstream-backup-baseline.yml
+  workflow_dispatch:
+
+# Checkout can read public source. No write permissions or repository secrets.
+permissions:
+  contents: read
+
+jobs:
+  official-backup-fixture-tests:
+    name: Official backup create/verify/restore fixture baseline
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1"
+    steps:
+      - name: Verify GitHub cloud host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS}" = "macOS"
+          test "${RUNNER_ARCH}" = "ARM64"
+          echo "GitHub-hosted runner: macOS / ARM64"
+
+      - name: Check out pinned public OpenClaw upstream
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+
+      - name: Refuse any other upstream revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git -C upstream rev-parse HEAD)"
+          test "$actual" = "1b58cb9a1b4f4353e1add63c8506db4d890962e8"
+          echo "Verified public OpenClaw upstream: $actual"
+
+      - name: Install upstream-required Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      - name: Install pinned pnpm package manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.9.0
+          test "$(pnpm --version)" = "12.9.0"
+
+      - name: Install upstream locked dependencies
+        working-directory: upstream
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Run upstream's real backup fixture tests
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.commands.config.ts \
+            src/commands/backup-capture-privacy.test.ts \
+            --maxWorkers=2
+
+      - name: Explain limits of any pass
+        if: success()
+        shell: bash
+        run: |
+          echo "PASS: pinned official OpenClaw backup fixture tests ran on GitHub-hosted macOS ARM64."
+          echo "This is not a production backup, not an S10 no-contact proof, and not a restore of existing data."
