@@ -1,0 +1,163 @@
+diff --git a/src/infra/backup-tar-walk.ts b/src/infra/backup-tar-walk.ts
+--- a/src/infra/backup-tar-walk.ts
++++ b/src/infra/backup-tar-walk.ts
+@@ -10,6 +10,8 @@
+   tar: Pick<typeof import("tar"), "Header" | "Pax">;
+   paths: readonly string[];
+   skip: (sourcePath: string) => boolean;
++  /** Fail closed on any multiply-linked regular file. Not a pre-planning isolation boundary. */
++  rejectMultiLinkedFiles?: boolean;
+   filter: (sourcePath: string, stat: Stats) => boolean;
+   onEntry: (sourcePath: string, header: HeaderData) => void;
+   onVanished: (sourcePath: string) => void;
+@@ -41,6 +43,9 @@
+         if (!params.filter(sourcePath, stat)) {
+           return;
+         }
++        if (params.rejectMultiLinkedFiles && stat.isFile() && stat.nlink !== 1) {
++          throw new Error(`Backup refuses a file with multiple hard links: ${sourcePath}`);
++        }
+         if (stat.isDirectory()) {
+           names = await fs.readdir(sourcePath);
+           await assertDirectory({ sourcePath, stat });
+@@ -56,6 +61,12 @@
+           if (!opened.isFile()) {
+             throw new Error(`Backup source changed while opening: ${sourcePath}`);
+           }
++          if (
++            params.rejectMultiLinkedFiles &&
++            (opened.nlink !== 1 || !sameFileIdentity(stat, opened))
++          ) {
++            throw new Error(`Backup refuses a multiply-linked or changed file: ${sourcePath}`);
++          }
+           // The kernel binds a no-follow open; later renames cannot invalidate its bytes.
+           // Without that support, bind the descriptor to a regular-file observation.
+           if (!noFollow) {
+diff --git a/src/infra/backup-create.ts b/src/infra/backup-create.ts
+--- a/src/infra/backup-create.ts
++++ b/src/infra/backup-create.ts
+@@ -76,6 +76,8 @@
+   includeWorkspace?: boolean;
+   onlyConfig?: boolean;
+   verify?: boolean;
++  /** Opt in to rejecting files with multiple hard-link names during archive traversal. */
++  rejectMultiLinkedFiles?: boolean;
+   json?: boolean;
+   nowMs?: number;
+   /**
+@@ -561,6 +563,7 @@
+               walkBackupTar({
+                 tar,
+                 paths: [...requiredSourcePaths],
++                rejectMultiLinkedFiles: opts.rejectMultiLinkedFiles,
+                 skip: (sourcePath) => {
+                   if (!requiredSourcePaths.has(sourcePath) && inventory.isVolatile(sourcePath)) {
+                     skippedEntries.set(sourcePath, "volatile");
+diff --git a/src/cli/program/register.backup.ts b/src/cli/program/register.backup.ts
+--- a/src/cli/program/register.backup.ts
++++ b/src/cli/program/register.backup.ts
+@@ -41,6 +41,11 @@
+     .option("--json", "Output JSON", false)
+     .option("--dry-run", "Print the backup plan without writing the archive", false)
+     .option("--verify", "Verify the archive after writing it", false)
++    .option(
++      "--reject-multi-linked-files",
++      "Fail if archive traversal encounters a file with multiple hard-link names",
++      false,
++    )
+     .option("--only-config", "Back up only the active JSON config file", false)
+     .option("--no-include-workspace", "Exclude workspace directories from the backup")
+     .addHelpText(
+diff --git a/src/infra/backup-tar-walk.test.ts b/src/infra/backup-tar-walk.test.ts
+--- a/src/infra/backup-tar-walk.test.ts
++++ b/src/infra/backup-tar-walk.test.ts
+@@ -21,7 +21,7 @@
+ async function collectArchive(
+   source: string,
+   chunks: Buffer[],
++  callbacks: Partial<Pick<Parameters<typeof walkBackupTar>[0], "onEntry" | "onVanished" | "rejectMultiLinkedFiles">> = {},
+-  callbacks: Partial<Pick<Parameters<typeof walkBackupTar>[0], "onEntry" | "onVanished">> = {},
+ ) {
+   for await (const chunk of walkBackupTar({
+     tar,
+@@ -160,6 +160,37 @@
+   },
+ );
+ 
++it.skipIf(process.platform === "win32")(
++  "rejects an alternate hard-link alias before opening or streaming bytes when opted in",
++  async () => {
++    const temp = tempDirs.make("backup-hardlink-guard-");
++    const source = path.join(temp, "source");
++    await fs.mkdir(source);
++    const unselected = path.join(temp, "unselected-fixture.txt");
++    const alias = path.join(source, "alias.txt");
++    const marker = "synthetic unselected fixture content";
++    await fs.writeFile(unselected, marker);
++    await fs.link(unselected, alias);
++    const openSpy = vi.spyOn(fs, "open");
++    const chunks: Buffer[] = [];
++    await expect(
++      collectArchive(source, chunks, { rejectMultiLinkedFiles: true }),
++    ).rejects.toThrow(/multiple hard links/u);
++    expect(openSpy.mock.calls.some(([openedPath]) => openedPath === alias)).toBe(false);
++    expect(Buffer.concat(chunks).includes(Buffer.from(marker))).toBe(false);
++  },
++);
++
++it("allows single-link regular files in opt-in mode", async () => {
++  const temp = tempDirs.make("backup-singlelink-guard-");
++  const source = path.join(temp, "single.txt");
++  const marker = "single-link fixture payload";
++  await fs.writeFile(source, marker);
++  const chunks: Buffer[] = [];
++  await collectArchive(source, chunks, { rejectMultiLinkedFiles: true });
++  expect(Buffer.concat(chunks).includes(Buffer.from(marker))).toBe(true);
++});
++
+ it("refuses a required root removed during a descendant open", async () => {
+   const temp = tempDirs.make("backup-root-removal-");
+   const root = path.join(temp, "source");
+diff --git a/src/commands/backup-capture-privacy.test.ts b/src/commands/backup-capture-privacy.test.ts
+--- a/src/commands/backup-capture-privacy.test.ts
++++ b/src/commands/backup-capture-privacy.test.ts
+@@ -71,6 +71,28 @@
+     }
+   });
+ 
++  it.skipIf(process.platform === "win32")(
++    "rejects a hardlinked workspace alias in opt-in create mode before producing an archive",
++    async () => {
++      const unselected = path.join(path.dirname(home.home), `${path.basename(home.home)}-outside-fixture.txt`);
++      try {
++        await fs.writeFile(unselected, "unselected fixture content");
++        await fs.link(unselected, path.join(home.home, "linked-fixture.txt"));
++        await configureAgents({ main: { workspace: home.home } });
++        await expect(
++          backupCreateCommand(createTestRuntime(), {
++            output,
++            verify: true,
++            rejectMultiLinkedFiles: true,
++          }),
++        ).rejects.toThrow(/multiple hard links/u);
++        await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++      } finally {
++        await fs.rm(unselected, { force: true });
++      }
++    },
++  );
++
+   it("excludes a capture whose paired owner is a directory link", async () => {
+     const otherState = path.join(home.home, "profile-b");
+     const otherCapture = `${otherState}.update-captures`;
+diff --git a/docs/cli/backup.md b/docs/cli/backup.md
+--- a/docs/cli/backup.md
++++ b/docs/cli/backup.md
+@@ -109,6 +109,7 @@
+ | `--claim-namespace`      | Deliberately replace the namespace ownership claim with this installation's identity. |
+ | `--output <path>`        | Also retain a local archive at a path or in a destination directory.                  |
+ | `--no-include-workspace` | Omit workspace files while retaining state, config, credentials, and agent databases. |
++| `--reject-multi-linked-files` | Opt in to refusing archive traversal if a regular file has multiple hard-link names. This is fail-closed, not an OS isolation or pre-planning no-contact guarantee. |
+ | `--only-config`          | Archive only the active config file; storage configuration must still be readable.    |
+ | `--keep-daily <n>`       | Retain the newest backup in each of the newest `n` nonempty UTC days.                 |
+ | `--keep-weekly <n>`      | Retain the newest backup in each of the newest `n` nonempty UTC weeks.                |
