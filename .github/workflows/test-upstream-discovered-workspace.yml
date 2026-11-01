@@ -50,8 +50,8 @@ jobs:
           git apply ../lab/patches/upstream-reject-multi-linked-files.patch
           git apply --check ../lab/patches/upstream-preplan-known-root-overlap.patch
           git apply ../lab/patches/upstream-preplan-known-root-overlap.patch
-          git apply --check ../lab/patches/upstream-preplan-discovered-workspace-overlap.patch
-          git apply ../lab/patches/upstream-preplan-discovered-workspace-overlap.patch
+          git apply --check ../lab/patches/upstream-preplan-discovered-workspace-incremental.patch
+          git apply ../lab/patches/upstream-preplan-discovered-workspace-incremental.patch
           git diff --check
           git diff --stat
           echo "Public upstream patch applied. No user data is mounted."
