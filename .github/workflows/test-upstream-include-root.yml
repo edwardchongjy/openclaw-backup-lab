@@ -1,0 +1,105 @@
+name: Test external config include pre-read refusal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/test-upstream-include-root.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-test:
+    name: Apply four guards and test external config include refusal
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1"
+    steps:
+      - name: Confirm isolated macOS ARM64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS}" = "macOS"
+          test "${RUNNER_ARCH}" = "ARM64"
+
+      - name: Check out public test patch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: lab
+          persist-credentials: false
+
+      - name: Check out pinned public upstream OpenClaw
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+
+      - name: Validate source revision and apply patch
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "1b58cb9a1b4f4353e1add63c8506db4d890962e8"
+          git apply --check ../lab/patches/upstream-reject-multi-linked-files.patch
+          git apply ../lab/patches/upstream-reject-multi-linked-files.patch
+          git apply --check ../lab/patches/upstream-preplan-known-root-overlap.patch
+          git apply ../lab/patches/upstream-preplan-known-root-overlap.patch
+          git apply --check ../lab/patches/upstream-preplan-discovered-workspace-incremental.patch
+          git apply ../lab/patches/upstream-preplan-discovered-workspace-incremental.patch
+          git apply --check ../lab/patches/upstream-preplan-include-root-overlap-incremental.patch
+          git apply ../lab/patches/upstream-preplan-include-root-overlap-incremental.patch
+          git diff --check
+          git diff --stat
+          echo "Public upstream patch applied. No user data is mounted."
+
+      - name: Set up pinned upstream Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      - name: Install pinned pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.9.0
+          test "$(pnpm --version)" = "12.9.0"
+
+      - name: Install upstream locked dependencies
+        working-directory: upstream
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Run official tar-walker tests with new hardlink guard cases
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.infra.config.ts \
+            src/infra/backup-tar-walk.test.ts \
+            --maxWorkers=2
+
+      - name: Run official backup create/verify/restore fixture tests with guard enabled
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.commands.config.ts \
+            src/commands/backup-capture-privacy.test.ts \
+            --maxWorkers=2
+
+      - name: State acceptance boundary
+        if: success()
+        shell: bash
+        run: |
+          echo "EXTERNAL_INCLUDE_ROOT_TEST_PASS: synthetic external include-root preflight only."
+          echo "No production OpenClaw files, macOS host data or historical archive tested."
+          echo "Does not establish full zero-contact: only known source and external include roots plus discovered workspaces are checked at their checkpoints."
+          echo "Other config includes within configured roots, path aliases, OS isolation and production paths remain unverified."
