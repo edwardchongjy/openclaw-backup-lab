@@ -1,0 +1,130 @@
+diff --git a/src/commands/backup-shared.ts b/src/commands/backup-shared.ts
+--- a/src/commands/backup-shared.ts
++++ b/src/commands/backup-shared.ts
+@@ -534,6 +534,7 @@
+     includeWorkspace?: boolean;
+     onlyConfig?: boolean;
+     nowMs?: number;
++    refuseSourceOverlap?: readonly string[];
+   } = {},
+ ) {
+   if (params.onlyConfig) {
+@@ -547,6 +548,7 @@
+   includeWorkspace?: boolean;
+   onlyConfig?: boolean;
+   nowMs?: number;
++  refuseSourceOverlap?: readonly string[];
+ }) {
+   const includeWorkspace = params.includeWorkspace ?? true;
+   const onlyConfig = params.onlyConfig ?? false;
+@@ -569,7 +571,6 @@
+   const configRead = await createConfigIO({ observe: false }).readConfigFileSnapshotForWrite();
+   const configSnapshot = configRead.snapshot;
+   const discoverySnapshot = resolveLegacyConfigSnapshotForBackup(configSnapshot) ?? configSnapshot;
+-  const configCapture = await resolveBackupConfigCapture(configRead);
+   if (discoverySnapshot.exists && !discoverySnapshot.valid) {
+     throw new Error(
+       `Backup discovery failed at ${shortenHomePath(discoverySnapshot.path)}: ${discoverySnapshot.issues.map((issue) => issue.message).join("; ")}. Agent and plugin ownership could not be resolved. Resolve the reported error and retry backup, or use --only-config to save the config alone.`,
+@@ -581,6 +582,29 @@
+     configPath,
+     oauthDir,
+   }).workspaceDirs;
++  // Check newly discovered workspace roots before config-capture pinning,
++  // agent-root discovery, realpath calls or archive traversal.
++  // This guard is lexical-only and does not cover config $include files
++  // already read by the config reader, or hidden filesystem aliases.
++  if (params.refuseSourceOverlap?.length) {
++    for (const rawRoot of params.refuseSourceOverlap) {
++      if (!rawRoot.trim() || !path.isAbsolute(rawRoot)) {
++        throw new Error("Backup source preflight requires absolute denied-root paths.");
++      }
++      const deniedRoot = path.resolve(rawRoot);
++      for (const discoveredRoot of discoveredWorkspaceDirs) {
++        const selected = path.resolve(discoveredRoot);
++        if (
++          selected === deniedRoot ||
++          isPathInside(deniedRoot, selected) ||
++          isPathInside(selected, deniedRoot)
++        ) {
++          throw new Error("Backup discovered workspace overlaps a denied root.");
++        }
++      }
++    }
++  }
++  const configCapture = await resolveBackupConfigCapture(configRead);
+   const agentRoots = await resolveBackupAgentRoots(discoverySnapshot.config);
+   const pluginInventory = resolveActivatedPluginBackupInventory({
+     config: discoverySnapshot.config,
+diff --git a/src/infra/backup-create.ts b/src/infra/backup-create.ts
+--- a/src/infra/backup-create.ts
++++ b/src/infra/backup-create.ts
+@@ -404,7 +404,12 @@
+       }
+     }
+   }
++  const plan = await resolveBackupPlanFromDisk({
++    includeWorkspace,
++    onlyConfig,
++    nowMs,
++    refuseSourceOverlap: opts.refuseSourceOverlap,
++  });
+-  const plan = await resolveBackupPlanFromDisk({ includeWorkspace, onlyConfig, nowMs });
+   const outputPath = await resolveOutputPath({
+     output: opts.output,
+     nowMs,
+diff --git a/src/commands/backup-capture-privacy.test.ts b/src/commands/backup-capture-privacy.test.ts
+--- a/src/commands/backup-capture-privacy.test.ts
++++ b/src/commands/backup-capture-privacy.test.ts
+@@ -185,6 +185,52 @@
+     await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+   });
+ 
++  it("refuses a discovered synthetic workspace before accessing its filesystem entries", async () => {
++    const deniedRoot = path.join(home.home, "synthetic-denied-workspace");
++    await fs.mkdir(deniedRoot);
++    const marker = path.join(deniedRoot, "unselected.txt");
++    await fs.writeFile(marker, "synthetic unselected bytes");
++    await configureAgents({ main: { workspace: deniedRoot } });
++    const watched = [
++      vi.spyOn(fs, "readFile"),
++      vi.spyOn(fs, "lstat"),
++      vi.spyOn(fs, "stat"),
++      vi.spyOn(fs, "readdir"),
++      vi.spyOn(fs, "realpath"),
++      vi.spyOn(fs, "open"),
++    ];
++    try {
++      await expect(
++        createBackupArchive({ output, refuseSourceOverlap: [deniedRoot] }),
++      ).rejects.toThrow("Backup discovered workspace overlaps a denied root.");
++      for (const spy of watched) {
++        expect(
++          spy.mock.calls.some(([candidate]) =>
++            typeof candidate === "string" &&
++            (candidate === deniedRoot || candidate.startsWith(deniedRoot + path.sep)),
++          ),
++        ).toBe(false);
++      }
++    } finally {
++      for (const spy of watched) {
++        spy.mockRestore();
++      }
++    }
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++    expect(await fs.readFile(marker, "utf8")).toBe("synthetic unselected bytes");
++  });
++
++  it("refuses a discovered synthetic workspace whose child intersects a denied root", async () => {
++    const workspace = path.join(home.home, "synthetic-wide-workspace");
++    const deniedRoot = path.join(workspace, "synthetic-denied-child");
++    await fs.mkdir(deniedRoot, { recursive: true });
++    await configureAgents({ main: { workspace } });
++    await expect(
++      createBackupArchive({ output, refuseSourceOverlap: [deniedRoot] }),
++    ).rejects.toThrow("Backup discovered workspace overlaps a denied root.");
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
+   it("refuses a config-only backup selected through a linked capture root", async () => {
+     const owner = path.join(home.home, "other-state");
+     const target = path.join(home.home, "legacy-data");
