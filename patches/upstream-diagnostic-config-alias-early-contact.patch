@@ -1,0 +1,55 @@
+diff --git a/src/commands/backup-capture-privacy.test.ts b/src/commands/backup-capture-privacy.test.ts
+--- a/src/commands/backup-capture-privacy.test.ts
++++ b/src/commands/backup-capture-privacy.test.ts
+@@ -94,6 +94,51 @@
+     },
+   );
+ 
++  it.each(["symlink", "hardlink"] as const)(
++    "diagnostic: a synthetic config alias is contacted before protected-path checks (%s)",
++    async (kind) => {
++      if (kind === "hardlink" && process.platform === "win32") {
++        return;
++      }
++      const deniedRoot = path.join(home.home, "synthetic-unselected-root");
++      await fs.mkdir(deniedRoot, { recursive: true });
++      const deniedFile = path.join(deniedRoot, "fixture-config.json");
++      await fs.writeFile(deniedFile, '{ "agents": { "ownership": "explicit", "entries": {} } }');
++      await fs.mkdir(stateDir, { recursive: true });
++      const alias = path.join(stateDir, "synthetic-linked-config.json");
++      if (kind === "symlink") {
++        await fs.symlink(deniedFile, alias);
++      } else {
++        await fs.link(deniedFile, alias);
++      }
++      vi.stubEnv("OPENCLAW_CONFIG_PATH", alias);
++      const originalRead = fsSync.readFileSync;
++      let attemptedReads = 0;
++      const spy = vi.spyOn(fsSync, "readFileSync").mockImplementation((...args) => {
++        if (
++          typeof args[0] === "string" &&
++          [alias, deniedFile].includes(path.resolve(args[0]))
++        ) {
++          attemptedReads++;
++          throw Object.assign(new Error("Synthetic alias read blocked by diagnostic"), {
++            code: "EACCES",
++          });
++        }
++        return originalRead(...args);
++      });
++      try {
++        // Positive result here proves a weakness, NOT successful protection.
++        await createBackupArchive({ output, refuseSourceOverlap: [deniedRoot] }).catch(
++          () => undefined,
++        );
++        expect(attemptedReads).toBeGreaterThan(0);
++      } finally {
++        spy.mockRestore();
++      }
++      await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++    },
++  );
++
+   it("excludes a capture whose paired owner is a directory link", async () => {
+     const otherState = path.join(home.home, "profile-b");
+     const otherCapture = `${otherState}.update-captures`;
