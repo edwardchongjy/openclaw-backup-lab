@@ -1,0 +1,39 @@
+diff --git a/src/commands/backup-capture-privacy.test.ts b/src/commands/backup-capture-privacy.test.ts
+--- a/src/commands/backup-capture-privacy.test.ts
++++ b/src/commands/backup-capture-privacy.test.ts
+@@ -1,3 +1,4 @@
++import fsSync from "node:fs";
+ import fs from "node:fs/promises";
+ import path from "node:path";
+ import { DatabaseSync } from "node:sqlite";
+@@ -71,6 +72,30 @@
+     }
+   });
+ 
++  it("diagnostic: a synthetic config is read during planning before the archive walker", async () => {
++    const configPath = path.join(stateDir, "openclaw.json");
++    await configureAgents({ main: { workspace: home.home } });
++    const unguardedReadFileSync = fsSync.readFileSync;
++    let preplanContactAttempts = 0;
++    const spy = vi.spyOn(fsSync, "readFileSync").mockImplementation((...args) => {
++      if (typeof args[0] === "string" && path.resolve(args[0]) === configPath) {
++        preplanContactAttempts += 1;
++        throw Object.assign(new Error("Synthetic planning-stage read blocked"), {
++          code: "EACCES",
++        });
++      }
++      return unguardedReadFileSync(...args);
++    });
++    try {
++      // This test proves a known deficiency; a passing diagnostic is NOT an isolation PASS.
++      await createBackupArchive({ output }).catch(() => undefined);
++    } finally {
++      spy.mockRestore();
++    }
++    expect(preplanContactAttempts).toBeGreaterThan(0);
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
+   it("excludes a capture whose paired owner is a directory link", async () => {
+     const otherState = path.join(home.home, "profile-b");
+     const otherCapture = `${otherState}.update-captures`;
