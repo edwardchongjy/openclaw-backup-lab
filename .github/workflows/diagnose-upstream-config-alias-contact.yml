@@ -1,0 +1,99 @@
+name: Diagnose early config alias contact on synthetic fixtures
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/diagnose-upstream-config-alias-contact.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-test:
+    name: Diagnose symlink and hardlink aliases after four guards
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1"
+    steps:
+      - name: Confirm isolated macOS ARM64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS}" = "macOS"
+          test "${RUNNER_ARCH}" = "ARM64"
+
+      - name: Check out public test patch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: lab
+          persist-credentials: false
+
+      - name: Check out pinned public upstream OpenClaw
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+
+      - name: Validate source revision and apply patch
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "1b58cb9a1b4f4353e1add63c8506db4d890962e8"
+          git apply --check ../lab/patches/upstream-reject-multi-linked-files.patch
+          git apply ../lab/patches/upstream-reject-multi-linked-files.patch
+          git apply --check ../lab/patches/upstream-preplan-known-root-overlap.patch
+          git apply ../lab/patches/upstream-preplan-known-root-overlap.patch
+          git apply --check ../lab/patches/upstream-preplan-discovered-workspace-incremental.patch
+          git apply ../lab/patches/upstream-preplan-discovered-workspace-incremental.patch
+          git apply --check ../lab/patches/upstream-preplan-include-root-overlap-incremental.patch
+          git apply ../lab/patches/upstream-preplan-include-root-overlap-incremental.patch
+          git apply --check ../lab/patches/upstream-diagnostic-config-alias-early-contact.patch
+          git apply ../lab/patches/upstream-diagnostic-config-alias-early-contact.patch
+          git diff --check
+          git diff --stat
+          echo "Public upstream patch applied. No user data is mounted."
+
+      - name: Set up pinned upstream Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      - name: Install pinned pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.9.0
+          test "$(pnpm --version)" = "12.9.0"
+
+      - name: Install upstream locked dependencies
+        working-directory: upstream
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Diagnose synthetic config alias read attempts in four-guard baseline
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.commands.config.ts \
+            src/commands/backup-capture-privacy.test.ts \
+            --testNamePattern "diagnostic: a synthetic config alias is contacted before protected-path checks" \
+            --maxWorkers=2
+
+      - name: State diagnostic boundary, NOT security acceptance
+        if: success()
+        shell: bash
+        run: |
+          echo "CONFIG_ALIAS_PREPLAN_CONTACT_REPRODUCED: deliberately blocked synthetic read attempts."
+          echo "Green means a vulnerability was detected; it is NOT a successful guard."
+          echo "No real archives, private data, Mac mini, Hermes, or production OpenClaw were read."
+          echo "Full zero-contact assurance remains NO-GO."
+
