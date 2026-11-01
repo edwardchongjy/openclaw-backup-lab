@@ -1,0 +1,87 @@
+diff --git a/src/infra/backup-create.ts b/src/infra/backup-create.ts
+--- a/src/infra/backup-create.ts
++++ b/src/infra/backup-create.ts
+@@ -23,7 +23,7 @@
+   backupManifestSizeError,
+   type BackupManifest,
+ } from "../commands/backup-verify-manifest.js";
++import { resolveConfigPath, resolveIncludeRoots, resolveOAuthDir, resolveStateDir } from "../config/config.js";
+-import { resolveConfigPath, resolveOAuthDir, resolveStateDir } from "../config/config.js";
+ import { resolveGatewayLockDir } from "../config/paths.js";
+ import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
+ import { resolveHomeDir, resolveUserPath } from "../utils.js";
+@@ -386,7 +386,15 @@
+   // This guard is deliberately narrow. Config includes and discovered workspaces
+   // are not known until after planning, and hardlink aliases need OS isolation.
+   if (opts.refuseSourceOverlap?.length) {
++    // External $include roots can be used by the config reader during plan discovery.
++    // Conservatively refuse a root that could contain a denied subtree before any config read.
++    // This is path-only: symlink aliases, hard links and OS isolation remain out of scope.
++    const knownSources = [
++      resolveStateDir(),
++      resolveConfigPath(),
++      resolveOAuthDir(),
++      ...resolveIncludeRoots(),
++    ];
+-    const knownSources = [resolveStateDir(), resolveConfigPath(), resolveOAuthDir()];
+     for (const rawRoot of opts.refuseSourceOverlap) {
+       if (!rawRoot.trim() || !path.isAbsolute(rawRoot)) {
+         throw new Error("Backup source preflight requires absolute denied-root paths.");
+diff --git a/src/commands/backup-capture-privacy.test.ts b/src/commands/backup-capture-privacy.test.ts
+--- a/src/commands/backup-capture-privacy.test.ts
++++ b/src/commands/backup-capture-privacy.test.ts
+@@ -1,3 +1,4 @@
++import fsSync from "node:fs";
+ import fs from "node:fs/promises";
+ import path from "node:path";
+ import { DatabaseSync } from "node:sqlite";
+@@ -231,6 +232,49 @@
+     await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+   });
+ 
++  it("refuses external include root overlap before the config reader reaches included files", async () => {
++    const includeRoot = path.join(home.home, "synthetic-external-includes");
++    await fs.mkdir(includeRoot, { recursive: true });
++    const includePath = path.join(includeRoot, "synthetic-agents.json5");
++    await fs.writeFile(includePath, '{ "agents": { "ownership": "explicit", "entries": {} } }');
++    await fs.mkdir(stateDir, { recursive: true });
++    await fs.writeFile(
++      path.join(stateDir, "openclaw.json"),
++      JSON.stringify({ $include: includePath }),
++    );
++    vi.stubEnv("OPENCLAW_INCLUDE_ROOTS", includeRoot);
++    const calls: string[] = [];
++    const originalRead = fsSync.readFileSync;
++    const spy = vi.spyOn(fsSync, "readFileSync").mockImplementation((...args) => {
++      if (typeof args[0] === "string" && path.resolve(args[0]) === includePath) {
++        calls.push(args[0]);
++        throw new Error("Unexpected included-file read");
++      }
++      return originalRead(...args);
++    });
++    try {
++      await expect(
++        createBackupArchive({ output, refuseSourceOverlap: [includeRoot] }),
++      ).rejects.toThrow("Backup source preflight refused overlap with a denied root.");
++      expect(calls).toEqual([]);
++    } finally {
++      spy.mockRestore();
++    }
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
++  it("refuses a broad external include root covering a narrower forbidden child", async () => {
++    const includeRoot = path.join(home.home, "synthetic-include-parent");
++    const deniedRoot = path.join(includeRoot, "synthetic-protected-child");
++    await fs.mkdir(deniedRoot, { recursive: true });
++    await configureAgents({ main: { workspace: path.join(home.home, "other-workspace") } });
++    vi.stubEnv("OPENCLAW_INCLUDE_ROOTS", includeRoot);
++    await expect(
++      createBackupArchive({ output, refuseSourceOverlap: [deniedRoot] }),
++    ).rejects.toThrow("Backup source preflight refused overlap with a denied root.");
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
+   it("refuses a config-only backup selected through a linked capture root", async () => {
+     const owner = path.join(home.home, "other-state");
+     const target = path.join(home.home, "legacy-data");
