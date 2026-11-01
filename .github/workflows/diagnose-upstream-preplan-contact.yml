@@ -1,0 +1,87 @@
+name: Diagnose backup preplanning contact on public fixture
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/diagnose-upstream-preplan-contact.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-preplan-diagnostic:
+    name: Detect early config reads in pinned official backup
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1"
+    steps:
+      - name: Assert independent Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS}" = "macOS"
+          test "${RUNNER_ARCH}" = "ARM64"
+
+      - name: Checkout public lab
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: lab
+          persist-credentials: false
+
+      - name: Checkout pinned public OpenClaw
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+
+      - name: Apply synthetic preplanning diagnostic to official source
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "1b58cb9a1b4f4353e1add63c8506db4d890962e8"
+          git apply --check ../lab/patches/upstream-preplan-config-contact-diagnostic.patch
+          git apply ../lab/patches/upstream-preplan-config-contact-diagnostic.patch
+          git diff --check
+          echo "This patch adds a test, NOT a safety fix."
+
+      - name: Setup upstream Node version
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      - name: Install pinned package manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.9.0
+          test "$(pnpm --version)" = "12.9.0"
+
+      - name: Install locked upstream public dependencies
+        working-directory: upstream
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Run diagnostic against actual official backup planning
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.commands.config.ts \
+            src/commands/backup-capture-privacy.test.ts \
+            --testNamePattern "diagnostic: a synthetic config is read during planning" \
+            --maxWorkers=2
+
+      - name: Explain what a green diagnostic means
+        if: success()
+        shell: bash
+        run: |
+          echo "EARLY_CONFIG_READ_OBSERVED: the diagnostic detected pre-tar contact with a synthetic config path."
+          echo "This confirms a missing pre-planning exclusion boundary, NOT an S10 or production isolation PASS."
