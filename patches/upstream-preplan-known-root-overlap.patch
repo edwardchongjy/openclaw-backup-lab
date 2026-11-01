@@ -1,0 +1,118 @@
+diff --git a/src/infra/backup-create.ts b/src/infra/backup-create.ts
+--- a/src/infra/backup-create.ts
++++ b/src/infra/backup-create.ts
+@@ -23,6 +23,7 @@
+   backupManifestSizeError,
+   type BackupManifest,
+ } from "../commands/backup-verify-manifest.js";
++import { resolveConfigPath, resolveOAuthDir, resolveStateDir } from "../config/config.js";
+ import { resolveGatewayLockDir } from "../config/paths.js";
+ import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
+ import { resolveHomeDir, resolveUserPath } from "../utils.js";
+@@ -86,6 +87,8 @@
+   log?: (message: string) => void;
+   /** Internal consumers bind later effects to the canonical images actually captured. */
+   onSqliteSnapshots?: (facts: readonly BackupSqliteSnapshotFact[]) => void;
++  /** Abort before disk plan discovery if known initial sources intersect any declared denied root. */
++  refuseSourceOverlap?: readonly string[];
+ };
+ 
+ type BackupManifestAgentRoot = Pick<BackupAgentRoot, "agentId" | "sourcePath">;
+@@ -377,6 +380,28 @@
+   const archiveRoot = buildBackupArchiveRoot(nowMs);
+   const onlyConfig = Boolean(opts.onlyConfig);
+   const includeWorkspace = onlyConfig ? false : (opts.includeWorkspace ?? true);
++  // Lexical-only preflight: NO realpath/stat/readdir/open before checking known roots.
++  // This guard is deliberately narrow. Config includes and discovered workspaces
++  // are not known until after planning, and hardlink aliases need OS isolation.
++  if (opts.refuseSourceOverlap?.length) {
++    const knownSources = [resolveStateDir(), resolveConfigPath(), resolveOAuthDir()];
++    for (const rawRoot of opts.refuseSourceOverlap) {
++      if (!rawRoot.trim() || !path.isAbsolute(rawRoot)) {
++        throw new Error("Backup source preflight requires absolute denied-root paths.");
++      }
++      const deniedRoot = path.resolve(rawRoot);
++      for (const source of knownSources) {
++        const selected = path.resolve(source);
++        if (
++          selected === deniedRoot ||
++          isPathInside(deniedRoot, selected) ||
++          isPathInside(selected, deniedRoot)
++        ) {
++          throw new Error("Backup source preflight refused overlap with a denied root.");
++        }
++      }
++    }
++  }
+   const plan = await resolveBackupPlanFromDisk({ includeWorkspace, onlyConfig, nowMs });
+   const outputPath = await resolveOutputPath({
+     output: opts.output,
+diff --git a/src/cli/program/register.backup.ts b/src/cli/program/register.backup.ts
+--- a/src/cli/program/register.backup.ts
++++ b/src/cli/program/register.backup.ts
+@@ -38,6 +38,12 @@
+     .option("--keep-daily <n>", "Retain the newest backup in N daily UTC buckets")
+     .option("--keep-weekly <n>", "Retain the newest backup in N weekly UTC buckets")
+     .option("--keep-monthly <n>", "Retain the newest backup in N monthly UTC buckets")
++    .option(
++      "--refuse-source-overlap <absolute-path>",
++      "Abort before planning if an initial backup source overlaps this root; repeatable, not full isolation",
++      collectOption,
++      [],
++    )
+     .option("--json", "Output JSON", false)
+     .option("--dry-run", "Print the backup plan without writing the archive", false)
+     .option("--verify", "Verify the archive after writing it", false)
+diff --git a/src/commands/backup-capture-privacy.test.ts b/src/commands/backup-capture-privacy.test.ts
+--- a/src/commands/backup-capture-privacy.test.ts
++++ b/src/commands/backup-capture-privacy.test.ts
+@@ -120,6 +120,49 @@
+     expect(entries.some((entry) => entry.includes("/profile-b.update-captures/"))).toBe(false);
+   });
+ 
++  it("refuses an explicitly denied config root before filesystem discovery", async () => {
++    const deniedRoot = path.join(home.home, "denied-fixture");
++    await fs.mkdir(deniedRoot);
++    const configPath = path.join(deniedRoot, "config.json");
++    await fs.writeFile(configPath, "{}");
++    vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
++    const spies = [
++      vi.spyOn(fs, "readFile"),
++      vi.spyOn(fs, "lstat"),
++      vi.spyOn(fs, "stat"),
++      vi.spyOn(fs, "readdir"),
++      vi.spyOn(fs, "realpath"),
++      vi.spyOn(fs, "open"),
++    ];
++    try {
++      await expect(
++        createBackupArchive({ output, onlyConfig: true, refuseSourceOverlap: [deniedRoot] }),
++      ).rejects.toThrow("Backup source preflight refused overlap with a denied root.");
++      for (const spy of spies) {
++        expect(
++          spy.mock.calls.some(([candidate]) =>
++            typeof candidate === "string" &&
++            (candidate === deniedRoot || candidate.startsWith(deniedRoot + path.sep)),
++          ),
++        ).toBe(false);
++      }
++    } finally {
++      for (const spy of spies) {
++        spy.mockRestore();
++      }
++    }
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
++  it("refuses a denied fixture nested inside the selected state root", async () => {
++    const deniedRoot = path.join(stateDir, "denied-fixture");
++    await fs.mkdir(deniedRoot);
++    await expect(
++      createBackupArchive({ output, refuseSourceOverlap: [deniedRoot] }),
++    ).rejects.toThrow("Backup source preflight refused overlap with a denied root.");
++    await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
+   it("refuses a config-only backup selected through a linked capture root", async () => {
+     const owner = path.join(home.home, "other-state");
+     const target = path.join(home.home, "legacy-data");
