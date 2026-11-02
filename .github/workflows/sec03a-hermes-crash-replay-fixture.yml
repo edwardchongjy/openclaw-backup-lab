@@ -1,0 +1,78 @@
+name: SEC-03A Hermes synthetic crash and replay
+# New workflow triggers once on creation/change. Manual dispatch supported.
+# No production systems or real memory. Faults kill only disposable subprocesses.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sec03a-hermes-crash-replay-fixture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crash-replay:
+    name: Verify owner-only one-use claim survives process crashes
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Checkout public fixture without retained credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Execute synthetic SEC-03A process crash cases
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "HOST_CONTROL=PASS_GITHUB_MACOS_ARM64"
+
+          source="$GITHUB_WORKSPACE/tests/sec02_hermes_synthetic_approval_broker.py"
+          probe="$GITHUB_WORKSPACE/tests/sec03_hermes_synthetic_crash_probe.py"
+          test -f "$source"
+          test -f "$probe"
+          /usr/bin/python3 -m py_compile "$source" "$probe"
+          echo "PYTHON_SYNTAX=PASS"
+
+          if /usr/bin/dscl . -read /Users/sec03_memowner >/dev/null 2>&1; then
+            echo "OWNER_NAME_COLLISION=BLOCKED"
+            exit 2
+          fi
+          if /usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk '$2 == 5931 {hit=1} END {exit !hit}'; then
+            echo "OWNER_UID_COLLISION=BLOCKED"
+            exit 2
+          fi
+
+          work="$(/usr/bin/mktemp -d /private/tmp/hermes-sec03.XXXXXXXX)"
+          cleanup() {
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec03_memowner >/dev/null 2>&1 || true
+            if [[ "$work" == /private/tmp/hermes-sec03.* ]]; then
+              /usr/bin/sudo -n /bin/rm -rf "$work" || true
+            fi
+          }
+          trap cleanup EXIT
+
+          /usr/bin/sudo -n /usr/bin/dscl . -create /Users/sec03_memowner
+          /usr/bin/sudo -n /usr/bin/dscl . -create /Users/sec03_memowner UserShell /bin/sh
+          /usr/bin/sudo -n /usr/bin/dscl . -create /Users/sec03_memowner RealName "Synthetic SEC-03 Owner"
+          /usr/bin/sudo -n /usr/bin/dscl . -create /Users/sec03_memowner UniqueID 5931
+          /usr/bin/sudo -n /usr/bin/dscl . -create /Users/sec03_memowner PrimaryGroupID 20
+          /usr/bin/sudo -n /usr/bin/dscl . -create /Users/sec03_memowner NFSHomeDirectory "$work"
+          test "$(/usr/bin/sudo -n -u sec03_memowner /usr/bin/id -u)" = 5931
+          if /usr/bin/id -Gn sec03_memowner | /usr/bin/grep -Eq '(^|[[:space:]])admin($|[[:space:]])'; then
+            echo "OWNER_ADMIN_GROUP=FAIL"
+            exit 1
+          fi
+          /usr/bin/sudo -n /usr/sbin/chown 5931:20 "$work"
+          /usr/bin/sudo -n /bin/chmod 0700 "$work"
+          echo "OWNER_UID_BOUNDARY=PASS"
+
+          /usr/bin/sudo -n -u sec03_memowner /usr/bin/python3 "$probe" "$source" "$work"
+          echo "SEC03A_WORKFLOW=PASS_SYNTHETIC_ONLY"
