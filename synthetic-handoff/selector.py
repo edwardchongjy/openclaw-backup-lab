@@ -68,6 +68,7 @@ def stage_selected(source_root: str, private_parent: str) -> str:
     pending_name = None
     final_name = None
     staging_fd = None
+    pending_created = False
     try:
         token = secrets.token_hex(16)
         pending_name = ".pending-" + token
@@ -75,6 +76,7 @@ def stage_selected(source_root: str, private_parent: str) -> str:
         # Parent is private; unique 128-bit name avoids colliding with other
         # cooperative jobs. This is NOT cross-process hostile-writer proof.
         os.mkdir(pending_name, 0o700, dir_fd=parent_fd)
+        pending_created = True
         staging_fd = os.open(
             pending_name,
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
@@ -99,7 +101,8 @@ def stage_selected(source_root: str, private_parent: str) -> str:
             src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
         )
         pending_name = None
-        os.fsync(parent_fd)
+        # Directory rename durability across sudden power loss is unproven.
+        # Do not raise after publication and misreport an already-published tree.
         return final_name
     finally:
         if staging_fd is not None:
@@ -111,7 +114,7 @@ def stage_selected(source_root: str, private_parent: str) -> str:
                     except FileNotFoundError:
                         pass
             os.close(staging_fd)
-        if pending_name is not None:
+        if pending_created and pending_name is not None:
             os.rmdir(pending_name, dir_fd=parent_fd)
         os.close(parent_fd)
 
