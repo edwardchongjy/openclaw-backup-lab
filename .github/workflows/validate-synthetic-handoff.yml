@@ -1,0 +1,48 @@
+name: Validate synthetic data-only handoff
+
+# Runs only when this workflow is created/changed or triggered manually.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-synthetic-handoff.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  synthetic-only:
+    name: Validate strict byte-only intake on GitHub-hosted macOS ARM64
+    runs-on: macos-26
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Confirm independent GitHub macOS ARM64 host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_OS}" = "macOS"
+          test "${RUNNER_ARCH}" = "ARM64"
+          python3 --version
+          echo "Runner: GitHub-hosted macOS ARM64; no local machine access."
+
+      - name: Check out public synthetic lab without retained credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Run black-box tests against only fictional fixture bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s synthetic-handoff -p 'test_*.py' -v
+
+      - name: Explain exact boundary of any PASS
+        if: success()
+        shell: bash
+        run: |
+          echo "SYNTHETIC_HANDOFF_PASS: schema-constrained, byte-only receiver behavior."
+          echo "Does not prove upstream source authentication, origin provenance or OS sandbox isolation."
+          echo "No real OpenClaw backup, protected history, Hermes data or Mac mini access."
+          echo "Production backup / restore / upgrade remains NO-GO."
