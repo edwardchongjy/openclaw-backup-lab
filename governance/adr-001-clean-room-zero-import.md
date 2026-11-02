@@ -9,6 +9,55 @@
   and ancestors remain NO-CONTACT, including any `exists`, list, stat,
   realpath, hash, marker or other query.
 
+## Verified disposable cloud baseline experiment — 2026-11-02
+
+GitHub Actions run **41520391394** completed successfully using **two independent
+GitHub-hosted Ubuntu 24.04 runner jobs**. This is evidence for a **cloud
+prototype only**, not acceptance of the production Mac's isolation.
+
+**Preflight job (PASS):**
+- Identified a GitHub-hosted, unprivileged Linux runner.
+- Confirmed none of a defined set of OpenClaw, Hermes, provider or channel
+  credential **environment variable names** were present. This is a bounded
+  check; it does not prove that the runner has no credential or network access.
+- Created a fresh private empty HOME/state/workspace scratch tree, with no
+  user-supplied data sources or existing setup.
+
+**Baseline job (PASS):**
+- Checked out only public OpenClaw source pinned to
+  `1b58cb9a1b4f4353e1add63c8506db4d890962e8` (version
+  `2026.10.5`) using a checkout that does not persist credentials.
+- Used Node `24.16.0`, pnpm `12.9.0`, frozen dependencies.
+- Executed **`setup --baseline --skip-bootstrap`** in a separately generated
+  scratch HOME via an environment allowlist. Did **not** execute onboarding,
+  imports, real channel setup, Gateway activation or a restore.
+- Verified a fresh config was created, the fresh workspace existed,
+  `skipBootstrap: true` was saved, and no explicit auth/channel config
+  keys were generated. After the command exited, the default local Gateway
+  port did not have a listening service.
+
+**Limits and open gates:**
+- Port not listening **after** setup does not prove there was never a
+  transient Gateway or network connection. No kernel-level no-egress
+  sandbox or process audit was performed.
+- Running in a public GitHub-hosted Linux runner is not proof about the
+  actual Mac, its filesystems, user credentials, mounted volumes, or
+  access via alias/inode. The repository checkout and package-manager
+  dependencies used normal internet connectivity.
+- C0–C2 may be marked **CLOUD_TEST_PASS within this one disposable run only**.
+  All production C0–C4 gates remain **UNVERIFIED / NOT AUTHORISED**.
+- This is a **clean installation baseline**. No user OpenClaw data, agent
+  memory, sessions, credentials or workflows were transferred; real
+  backup/restore remains 0; writer gates 0/7 and six P0 remain open.
+
+[See the exact GitHub Actions run](https://github.com/edwardchongjy/openclaw-backup-lab/actions/runs/41520391394).
+
+**One next meaningful decision:** whether to treat fresh-install-only
+reconstruction as a distinct recovery objective, rather than imply that
+migrating existing state is now safe. The missing first-mile source
+authorisation and real Mac zero-contact isolation remain independent
+blockers. No production activation should follow automatically.
+
 ## The engineering choice
 
 **Choose:** Build an independently provisioned **clean-room, zero-import**
