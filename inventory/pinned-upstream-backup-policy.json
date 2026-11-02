@@ -1,0 +1,292 @@
+{
+  "schema": "edwrd-official-backup-scope-inventory/v1",
+  "upstream": {
+    "repository": "openclaw/openclaw",
+    "commit": "1b58cb9a1b4f4353e1add63c8506db4d890962e8",
+    "version": "2026.10.5"
+  },
+  "origin": "Public pinned upstream source and documentation only. Not discovered from any user host.",
+  "permission": "READ_PUBLIC_UPSTREAM_ONLY",
+  "current_host_evidence": "UNKNOWN_NOT_REQUESTED",
+  "production_decision": "NO_GO",
+  "rules": [
+    {
+      "id": "active_config",
+      "category": "include_for_full",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Active authored config file may include external paths",
+      "evidence_key": "config_source_paths"
+    },
+    {
+      "id": "config_include_dependencies",
+      "category": "include_for_full",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Full archive includes required config dependencies outside state and even excluded workspaces",
+      "evidence_key": "includes_outside_state"
+    },
+    {
+      "id": "state_tree",
+      "category": "include_for_full",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Live OpenClaw state tree selected for a full archive; may contain sessions and auth",
+      "evidence_key": "state_candidate"
+    },
+    {
+      "id": "credentials",
+      "category": "include_for_full",
+      "risk": "secret",
+      "is_dynamic": true,
+      "classification": "Credentials can live under or outside state root",
+      "evidence_key": "oauth_candidate"
+    },
+    {
+      "id": "workspaces",
+      "category": "optional_for_full",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Config-derived workspaces selected unless workspace disabled; not a strict no-read boundary",
+      "evidence_key": "workspace_candidate"
+    },
+    {
+      "id": "agent_roots",
+      "category": "include_for_full",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Agent roots may be outside state and are configuration-dependent",
+      "evidence_key": "agent_candidate"
+    },
+    {
+      "id": "global_sqlite",
+      "category": "special_consistent_snapshot",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Use captured canonical global SQLite inventory; never copy a live database or sidecar as portable artifact",
+      "evidence_key": "global_database"
+    },
+    {
+      "id": "agent_sqlite",
+      "category": "special_consistent_snapshot",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Per-agent SQLite snapshot and agent id are separately validated",
+      "evidence_key": "agent_database"
+    },
+    {
+      "id": "plugin_resources",
+      "category": "conditional_by_plugin_manifest",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Plugin resources may explicitly include or exclude paths based on manifest",
+      "evidence_key": "plugin_disposition"
+    },
+    {
+      "id": "managed_skill_resources",
+      "category": "conditional_by_discovery",
+      "risk": "sensitive",
+      "is_dynamic": true,
+      "classification": "Configured managed skills outside roots may be discovered separately",
+      "evidence_key": "managed_skill_candidate"
+    },
+    {
+      "id": "private_update_captures",
+      "category": "never_contact",
+      "risk": "restricted",
+      "is_dynamic": true,
+      "classification": "Private historical update captures and every alias/ancestor require independent exclusion, NOT a live scan",
+      "evidence_key": "private_update_captures"
+    },
+    {
+      "id": "volatile_and_regenerable",
+      "category": "exclude_or_rebuild",
+      "risk": "operational",
+      "is_dynamic": true,
+      "classification": "Temporary, volatile, generated and regenerable resources excluded depending on ownership",
+      "evidence_key": "regenerable_roots"
+    },
+    {
+      "id": "plugin_modules_and_generated_index",
+      "category": "rebuild_after_restore",
+      "risk": "operational",
+      "is_dynamic": true,
+      "classification": "Plugin node_modules and generated plugin-skills index omitted; reinstall/rebuild before use",
+      "evidence_key": "plugin_modules_omitted"
+    },
+    {
+      "id": "only_config_mode",
+      "category": "insufficient_for_full_restore",
+      "risk": "incomplete",
+      "is_dynamic": false,
+      "classification": "Root config only, not modular includes or restorable full state",
+      "evidence_key": "config_only_limit"
+    },
+    {
+      "id": "archive_verification",
+      "category": "required_but_not_sufficient",
+      "risk": "integrity",
+      "is_dynamic": true,
+      "classification": "Manifest and SQLite verified; some plugin files opaque to archive verifier",
+      "evidence_key": "verify_gap"
+    },
+    {
+      "id": "restore_staging",
+      "category": "fresh_target_only",
+      "risk": "operational",
+      "is_dynamic": true,
+      "classification": "Archive restore is to a fresh staging target, not live in-place; activation is separate",
+      "evidence_key": "restore_not_in_place"
+    },
+    {
+      "id": "cross_db_consistency",
+      "category": "cannot_claim_atomic",
+      "risk": "integrity",
+      "is_dynamic": false,
+      "classification": "Archived config and multiple databases are not a single atomic point in time",
+      "evidence_key": "nonatomic_snapshot"
+    },
+    {
+      "id": "offsite_and_plaintext",
+      "category": "must_review_encryption",
+      "risk": "secret",
+      "is_dynamic": true,
+      "classification": "Retained local copy can be plaintext even if offsite encryption is configured",
+      "evidence_key": "plain_local_copy"
+    }
+  ],
+  "evidence": [
+    {
+      "key": "config_source_paths",
+      "file": "src/commands/backup-shared.ts",
+      "contains": "{ kind: \"config\" as const, sourcePath: path.resolve(configPath) }"
+    },
+    {
+      "key": "includes_outside_state",
+      "file": "docs/cli/backup.md",
+      "contains": "including dependencies outside the state directory"
+    },
+    {
+      "key": "state_candidate",
+      "file": "src/commands/backup-shared.ts",
+      "contains": "{ kind: \"state\", sourcePath: path.resolve(stateDir) }"
+    },
+    {
+      "key": "oauth_candidate",
+      "file": "src/commands/backup-shared.ts",
+      "contains": "{ kind: \"credentials\" as const, sourcePath: path.resolve(oauthDir) }"
+    },
+    {
+      "key": "workspace_candidate",
+      "file": "src/commands/backup-shared.ts",
+      "contains": "...workspaceDirs.map((workspaceDir) => ({"
+    },
+    {
+      "key": "agent_candidate",
+      "file": "src/commands/backup-shared.ts",
+      "contains": "...agentRoots.map((root) => ({ kind: \"agent\" as const, sourcePath: root.sourcePath }))"
+    },
+    {
+      "key": "global_database",
+      "file": "docs/cli/backup.md",
+      "contains": "Shared OpenClaw state"
+    },
+    {
+      "key": "agent_database",
+      "file": "docs/cli/backup.md",
+      "contains": "One per-agent database"
+    },
+    {
+      "key": "plugin_disposition",
+      "file": "src/commands/backup-resource-inventory.ts",
+      "contains": "resource.disposition === \"include\""
+    },
+    {
+      "key": "managed_skill_candidate",
+      "file": "src/commands/backup-shared.ts",
+      "contains": "kind: \"managed skill\""
+    },
+    {
+      "key": "private_update_captures",
+      "file": "docs/cli/backup.md",
+      "contains": "root is excluded from ordinary archives"
+    },
+    {
+      "key": "regenerable_roots",
+      "file": "src/commands/backup-resource-inventory.ts",
+      "contains": "exclude(\"managed state\", path.join(stateDir, root))"
+    },
+    {
+      "key": "plugin_modules_omitted",
+      "file": "docs/cli/backup.md",
+      "contains": "Plugin `node_modules` trees"
+    },
+    {
+      "key": "config_only_limit",
+      "file": "docs/cli/backup.md",
+      "contains": "not** its `$include` dependencies"
+    },
+    {
+      "key": "verify_gap",
+      "file": "docs/cli/backup.md",
+      "contains": "remain opaque during verification and restore"
+    },
+    {
+      "key": "restore_not_in_place",
+      "file": "docs/cli/backup.md",
+      "contains": "It never restores in place and has no `--force` mode"
+    },
+    {
+      "key": "nonatomic_snapshot",
+      "file": "docs/cli/backup.md",
+      "contains": "not one atomic snapshot across config and all databases"
+    },
+    {
+      "key": "plain_local_copy",
+      "file": "docs/cli/backup.md",
+      "contains": "ordinary plaintext"
+    }
+  ],
+  "acceptance_gates": [
+    {
+      "id": "inventory_source_drift",
+      "status": "UNVERIFIED",
+      "condition": "Pinned public evidence and actual deployed version match"
+    },
+    {
+      "id": "source_origin_authorisation",
+      "status": "OPEN",
+      "condition": "Every real source approved without scanning forbidden history"
+    },
+    {
+      "id": "s10_no_contact_os_enforcement",
+      "status": "OPEN",
+      "condition": "Independent OS isolation and source aliases proven on real host without prohibited contact"
+    },
+    {
+      "id": "full_resource_coverage",
+      "status": "OPEN",
+      "condition": "All actual active config, agents, plugin paths, snapshots, and dependencies reconciled"
+    },
+    {
+      "id": "backup_integrity",
+      "status": "OPEN",
+      "condition": "Cold copy includes coherent full state, manifests, hashes, and all relevant snapshots"
+    },
+    {
+      "id": "verified_real_restore",
+      "status": "OPEN",
+      "condition": "Independent end-to-end restore and application recovery demonstrated"
+    },
+    {
+      "id": "writer_safety",
+      "status": "OPEN",
+      "condition": "0/7 writer class gates still await validation"
+    },
+    {
+      "id": "six_p0",
+      "status": "OPEN",
+      "condition": "Six unresolved P0 controls remain unapproved"
+    }
+  ]
+}
