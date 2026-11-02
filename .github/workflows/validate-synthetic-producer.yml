@@ -1,0 +1,116 @@
+name: Validate isolated synthetic producer to receiver
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-synthetic-producer.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  protocol-tests:
+    name: Synthetic protocol tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out public lab without retained credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run receiver and producer synthetic tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s synthetic-handoff -p 'test_*.py' -v
+      - name: State strictly limited result
+        if: success()
+        shell: bash
+        run: |
+          echo "SYNTHETIC_PROTOCOL_PASS: fixed filename allowlist and byte-only receiver fixtures."
+          echo "No live OpenClaw or user files; this does not establish source provenance."
+
+  os-identity-separation:
+    name: Synthetic root-owned protected inode vs unprivileged producer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out public lab without retained credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Verify Ubuntu identity separation on disposable fake sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = "Linux"
+          test "$(id -u)" -ne 0
+          command -v sudo >/dev/null
+          sudo -n true
+          id nobody >/dev/null
+          test -x /usr/bin/python3
+
+          work="$(mktemp -d /tmp/oc-producer-fixture-XXXXXXXX)"
+          test -n "$work"
+          case "$work" in /tmp/oc-producer-fixture-*) ;; *) exit 4 ;; esac
+          trap 'sudo -n rm -rf -- "$work"' EXIT
+          chmod 0711 "$work"
+          cp synthetic-handoff/producer.py "$work/producer.py"
+          chmod 0644 "$work/producer.py"
+
+          mkdir -m 0700 "$work/staged-allowed" "$work/staged-attack" "$work/root-owned-protected"
+          sudo -n chown root:root "$work/root-owned-protected"
+          sudo -n chmod 0700 "$work/root-owned-protected"
+          sudo -n sh -c 'printf "FICTIONAL_DENIED_INODE_NOT_A_SECRET\n" > "$1"' -- "$work/root-owned-protected/fixture.txt"
+          sudo -n chmod 0600 "$work/root-owned-protected/fixture.txt"
+          test "$(sudo -n stat -c %u "$work/root-owned-protected/fixture.txt")" = "0"
+
+          sudo -n chown nobody:nogroup "$work/staged-allowed" "$work/staged-attack"
+          sudo -n -u nobody /usr/bin/python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1])/"settings.json"; p.write_bytes(bytes.fromhex("7b2266696374696f6e616c5f66697874757265223a747275657d0a")); p.chmod(0o600)' "$work/staged-allowed"
+          sudo -n -u nobody /usr/bin/python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1])/"settings.json"; p.write_bytes(bytes.fromhex("7b2266696374696f6e616c5f66697874757265223a747275657d0a")); p.chmod(0o600)' "$work/staged-attack"
+          sudo -n ln -s "$work/root-owned-protected/fixture.txt" "$work/staged-attack/notes.txt"
+          sudo -n ln "$work/root-owned-protected/fixture.txt" "$work/staged-attack/agent-inventory.json"
+
+          # The same inode is inaccessible through any ordinary alias to user nobody.
+          if sudo -n -u nobody /bin/cat "$work/root-owned-protected/fixture.txt" >/dev/null 2>&1; then
+            echo "DIRECT_ROOT_OWNED_READ=UNEXPECTEDLY_ALLOWED"; exit 1
+          fi
+          if sudo -n -u nobody /bin/cat "$work/staged-attack/notes.txt" >/dev/null 2>&1; then
+            echo "SYMLINK_ROOT_OWNED_READ=UNEXPECTEDLY_ALLOWED"; exit 1
+          fi
+          if sudo -n -u nobody /bin/cat "$work/staged-attack/agent-inventory.json" >/dev/null 2>&1; then
+            echo "HARDLINK_ROOT_OWNED_READ=UNEXPECTEDLY_ALLOWED"; exit 1
+          fi
+          echo "OS_UID_DENIES_DIRECT_SYMLINK_HARDLINK_READ=PASS"
+
+          # Only already-staged, producer-owned ordinary files are exported.
+          sudo -n -u nobody /usr/bin/python3 -B "$work/producer.py" "$work/staged-allowed" > "$work/envelope.json"
+          python3 -B synthetic-handoff/receiver.py "$work/reconstructed" < "$work/envelope.json"
+          test -f "$work/reconstructed/settings.json"
+          /usr/bin/python3 -c 'import pathlib,sys; assert pathlib.Path(sys.argv[1]).read_bytes() == bytes.fromhex("7b2266696374696f6e616c5f66697874757265223a747275657d0a")' "$work/reconstructed/settings.json"
+          test "$(find "$work/reconstructed" -type f | wc -l)" -eq 1
+          echo "SYNTHETIC_ALLOWED_BYTES_RECONSTRUCTED=PASS"
+
+          # Both malicious aliases were inserted before the unprivileged producer starts.
+          # Any invalid allowed entry must prevent stdout envelope publication.
+          if sudo -n -u nobody /usr/bin/python3 -B "$work/producer.py" "$work/staged-attack" > "$work/rejected-envelope.json" 2> "$work/rejected-error.log"; then
+            echo "UNSAFE_ALIASES=UNEXPECTEDLY_ACCEPTED"; exit 1
+          fi
+          test ! -s "$work/rejected-envelope.json"
+          echo "SYNTHETIC_ALIAS_STAGE_REJECTED_WITHOUT_OUTPUT=PASS"
+
+      - name: Precisely state safety boundary
+        if: success()
+        shell: bash
+        run: |
+          echo "SYNTHETIC_OS_IDENTITY_PASS: root-owned 0600 inode cannot be read by nobody via direct path, symlink or hardlink."
+          echo "This test DOES NOT establish isolation on Mac mini, a safe trusted source selector, or S10 zero contact."
+          echo "Real backup/restore/upgrade remain NO-GO."
