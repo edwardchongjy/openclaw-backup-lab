@@ -1,0 +1,131 @@
+name: SEC-01 Hermes synthetic memory owner isolation
+
+# Initial creation triggers ONE cloud-only fixture run; future runs are manual.
+# This tests OS file permissions, NOT Hermes or its approval broker.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sec01-hermes-memory-identity-isolation.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  identity-isolation:
+    name: Verify non-admin AI cannot write independent owner's synthetic memory
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: SEC-01 synthetic POSIX identity boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "HOST_CONTROL=PASS_GITHUB_MACOS_ARM64"
+
+          for name in sec01_memowner sec01_ai; do
+            if /usr/bin/dscl . -read "/Users/$name" >/dev/null 2>&1; then
+              echo "ACCOUNT_COLLISION=BLOCKED"
+              exit 2
+            fi
+          done
+          for uid in 5901 5902; do
+            if /usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk -v id="$uid" '$2 == id {found=1} END {exit !found}'; then
+              echo "UID_COLLISION=BLOCKED"
+              exit 2
+            fi
+          done
+
+          work="$(/usr/bin/mktemp -d /private/tmp/hermes-sec01.XXXXXXXX)"
+          cleanup() {
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec01_ai >/dev/null 2>&1 || true
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec01_memowner >/dev/null 2>&1 || true
+            if [[ "$work" == /private/tmp/hermes-sec01.* ]]; then
+              /usr/bin/sudo -n /bin/rm -rf "$work" || true
+            fi
+          }
+          trap cleanup EXIT
+          /bin/chmod 0755 "$work"
+
+          for pair in "sec01_memowner:5901" "sec01_ai:5902"; do
+            IFS=: read -r name uid <<< "$pair"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" UserShell /bin/sh
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" RealName "Synthetic SEC-01 Fixture"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" UniqueID "$uid"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" PrimaryGroupID 20
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" NFSHomeDirectory "$work/$name"
+          done
+
+          test "$(/usr/bin/sudo -n -u sec01_memowner /usr/bin/id -u)" = 5901
+          test "$(/usr/bin/sudo -n -u sec01_ai /usr/bin/id -u)" = 5902
+          if /usr/bin/id -Gn sec01_ai | /usr/bin/grep -Eq '(^|[[:space:]])admin($|[[:space:]])'; then
+            echo "AI_ADMIN_GROUP=FAIL"
+            exit 1
+          fi
+          if /usr/bin/sudo -n -u sec01_ai /usr/bin/sudo -n /usr/bin/id -u >/dev/null 2>&1; then
+            echo "AI_PASSWORDLESS_SUDO=FAIL"
+            exit 1
+          fi
+          echo "SEPARATE_NONADMIN_IDENTITIES=PASS"
+
+          /bin/mkdir -p "$work/vault" "$work/ai-space"
+          /usr/bin/sudo -n /usr/sbin/chown 5901:20 "$work/vault"
+          /usr/bin/sudo -n /usr/sbin/chown 5902:20 "$work/ai-space"
+          /usr/bin/sudo -n /bin/chmod 0750 "$work/vault"
+          /usr/bin/sudo -n /bin/chmod 0700 "$work/ai-space"
+          memory="$work/vault/MEMORY.md"
+          /usr/bin/sudo -n -u sec01_memowner /bin/sh -c 'printf "SYNTHETIC_ONLY:alpha\n" > "$1"' sh "$memory"
+          /usr/bin/sudo -n /bin/chmod 0640 "$memory"
+
+          /usr/bin/sudo -n -u sec01_ai /bin/cat "$memory" >/dev/null
+          /usr/bin/sudo -n -u sec01_ai /usr/bin/python3 -c 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("SYNTHETIC_ONLY:own")' "$work/ai-space/own"
+          test "$(/bin/cat "$work/ai-space/own")" = "SYNTHETIC_ONLY:own"
+          echo "READ_AND_PYTHON_POSITIVE_CONTROLS=PASS"
+
+          unchanged() {
+            /usr/bin/cmp -s "$memory" <(/usr/bin/printf 'SYNTHETIC_ONLY:alpha\n')
+          }
+          expect_denied() {
+            label="$1"
+            shift
+            if "$@" >/dev/null 2>&1; then
+              echo "$label=FAIL_ALLOWED"
+              exit 1
+            fi
+            if ! unchanged; then
+              echo "$label=FAIL_MEMORY_CHANGED"
+              exit 1
+            fi
+            echo "$label=PASS_DENIED"
+          }
+
+          expect_denied "AI_SHELL_APPEND" /usr/bin/sudo -n -u sec01_ai /bin/sh -c 'printf "bad\n" >> "$1"' sh "$memory"
+          expect_denied "AI_PYTHON_WRITE" /usr/bin/sudo -n -u sec01_ai /usr/bin/python3 -c 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("bad")' "$memory"
+          expect_denied "AI_PYTHON_UNLINK" /usr/bin/sudo -n -u sec01_ai /usr/bin/python3 -c 'import pathlib,sys;pathlib.Path(sys.argv[1]).unlink()' "$memory"
+          expect_denied "AI_SHELL_DELETE" /usr/bin/sudo -n -u sec01_ai /bin/rm "$memory"
+          expect_denied "AI_CHMOD" /usr/bin/sudo -n -u sec01_ai /bin/chmod 0666 "$memory"
+
+          /usr/bin/sudo -n -u sec01_ai /bin/sh -c 'printf "bad\n" > "$1"' sh "$work/ai-space/replacement"
+          expect_denied "AI_REPLACE_RENAME" /usr/bin/sudo -n -u sec01_ai /bin/mv "$work/ai-space/replacement" "$memory"
+          /usr/bin/sudo -n -u sec01_ai /bin/ln -s "$memory" "$work/ai-space/alias"
+          expect_denied "AI_SYMLINK_WRITE" /usr/bin/sudo -n -u sec01_ai /bin/sh -c 'printf "bad\n" > "$1"' sh "$work/ai-space/alias"
+          expect_denied "AI_AUTH_TRUE_NO_PRIVILEGE" /usr/bin/sudo -n -u sec01_ai /usr/bin/python3 -c 'import sys;authorized=True;open(sys.argv[1],"w").write("bad")' "$memory"
+
+          if /usr/bin/sudo -n -u sec01_ai /bin/ln "$memory" "$work/ai-space/hardlink" >/dev/null 2>&1; then
+            expect_denied "AI_HARDLINK_WRITE" /usr/bin/sudo -n -u sec01_ai /bin/sh -c 'printf "bad\n" >> "$1"' sh "$work/ai-space/hardlink"
+          else
+            echo "AI_HARDLINK_CREATION=PASS_DENIED"
+          fi
+          unchanged
+          echo "AI_DIRECT_WRITE_AND_ALIASES=PASS"
+
+          /usr/bin/sudo -n -u sec01_memowner /bin/sh -c 'printf "SYNTHETIC_ONLY:approved\n" >> "$1"' sh "$memory"
+          /usr/bin/cmp -s "$memory" <(/usr/bin/printf 'SYNTHETIC_ONLY:alpha\nSYNTHETIC_ONLY:approved\n')
+          echo "INDEPENDENT_OWNER_WRITE=PASS"
+          echo "SEC01_RESULT=PASS_OS_FILE_PERMISSION_FIXTURE_ONLY"
+          echo "NOT_VERIFIED=human_approval_broker,macos_27_compatibility,hermes_integration,production_isolation"
