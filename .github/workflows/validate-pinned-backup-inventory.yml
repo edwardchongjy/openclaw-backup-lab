@@ -1,0 +1,57 @@
+name: Validate pinned OpenClaw backup scope inventory
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-pinned-backup-inventory.yml
+  workflow_dispatch:
+
+# Public repository and pinned public upstream sources only.
+permissions:
+  contents: read
+
+jobs:
+  public-inventory:
+    name: Verify official 2026.10.5 backup categories without live-host reads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out public independent inventory lab
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: lab
+          persist-credentials: false
+
+      - name: Check out pinned public OpenClaw source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: public-upstream
+          persist-credentials: false
+
+      - name: Run inventory denial and drift tests
+        working-directory: lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s inventory -p 'test_*.py' -v
+
+      - name: Cross-check against pinned official public code
+        working-directory: lab
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B inventory/verify_policy.py --upstream ../public-upstream
+
+      - name: State production NO-GO boundary
+        if: success()
+        shell: bash
+        run: |
+          echo "PUBLIC_UPSTREAM_INVENTORY_PASS: source classification only."
+          echo "No live OpenClaw, real data sources, protected S10 history or user host involved."
+          echo "All actual source roots, aliases, identity separation and restore validation remain UNKNOWN."
+          echo "Real OpenClaw backup / restore / upgrade: NO-GO."
