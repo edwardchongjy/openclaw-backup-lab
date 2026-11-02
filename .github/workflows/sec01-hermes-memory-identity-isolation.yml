@@ -84,7 +84,7 @@ jobs:
 
           /usr/bin/sudo -n -u sec01_ai /bin/cat "$memory" >/dev/null
           /usr/bin/sudo -n -u sec01_ai /usr/bin/python3 -c 'import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("SYNTHETIC_ONLY:own")' "$work/ai-space/own"
-          test "$(/bin/cat "$work/ai-space/own")" = "SYNTHETIC_ONLY:own"
+          test "$(/usr/bin/sudo -n -u sec01_ai /bin/cat "$work/ai-space/own")" = "SYNTHETIC_ONLY:own"
           echo "READ_AND_PYTHON_POSITIVE_CONTROLS=PASS"
 
           unchanged() {
