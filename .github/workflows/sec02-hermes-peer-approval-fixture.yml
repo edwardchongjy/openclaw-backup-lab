@@ -107,8 +107,12 @@ jobs:
 
           /usr/bin/sudo -n -u sec02_memowner /usr/bin/python3 "$script" serve "$work" 5912 5911 > "$work/broker.log" 2>&1 &
           pid=$!
-          for _ in $(/usr/bin/seq 1 80); do
+          for _ in $(/usr/bin/seq 1 240); do
             test -S "$socket" && break
+            if ! /bin/kill -0 "$pid" 2>/dev/null; then
+              echo "BROKER_PROCESS_EXITED_BEFORE_READY"
+              break
+            fi
             /bin/sleep 0.25
           done
           if ! test -S "$socket"; then
