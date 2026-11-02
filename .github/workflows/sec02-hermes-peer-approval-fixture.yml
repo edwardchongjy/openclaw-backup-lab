@@ -1,0 +1,172 @@
+name: SEC-02 Hermes synthetic identity-checked approval
+
+# Cloud-only synthetic fixture. First commit triggers exactly this workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sec02-hermes-peer-approval-fixture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  peer-approval:
+    name: Verify unprivileged proposer cannot impersonate independent approver
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Check out public synthetic fixture without saved credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Execute SEC-02 macOS peer identity + one-use synthetic approval
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "HOST_CONTROL=PASS_GITHUB_MACOS_ARM64"
+
+          script="$GITHUB_WORKSPACE/tests/sec02_hermes_synthetic_approval_broker.py"
+          test -f "$script"
+          /usr/bin/python3 -m py_compile "$script"
+          echo "BROKER_PYTHON_SYNTAX=PASS"
+
+          for name in sec02_memowner sec02_ai; do
+            if /usr/bin/dscl . -read "/Users/$name" >/dev/null 2>&1; then
+              echo "ACCOUNT_COLLISION=BLOCKED"
+              exit 2
+            fi
+          done
+          for uid in 5911 5912; do
+            if /usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk -v id="$uid" '$2 == id {found=1} END {exit !found}'; then
+              echo "UID_COLLISION=BLOCKED"
+              exit 2
+            fi
+          done
+
+          work="$(/usr/bin/mktemp -d /private/tmp/hermes-sec02.XXXXXXXX)"
+          pid=""
+          cleanup() {
+            if test -n "$pid"; then
+              /bin/kill "$pid" >/dev/null 2>&1 || true
+              wait "$pid" >/dev/null 2>&1 || true
+            fi
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec02_ai >/dev/null 2>&1 || true
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec02_memowner >/dev/null 2>&1 || true
+            if [[ "$work" == /private/tmp/hermes-sec02.* ]]; then
+              /usr/bin/sudo -n /bin/rm -rf "$work" || true
+            fi
+          }
+          trap cleanup EXIT
+          /bin/chmod 0755 "$work"
+
+          for pair in "sec02_memowner:5911" "sec02_ai:5912"; do
+            IFS=: read -r name uid <<< "$pair"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" UserShell /bin/sh
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" RealName "Synthetic SEC-02 Fixture"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" UniqueID "$uid"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" PrimaryGroupID 20
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" NFSHomeDirectory "$work/$name"
+          done
+
+          test "$(/usr/bin/sudo -n -u sec02_memowner /usr/bin/id -u)" = 5911
+          test "$(/usr/bin/sudo -n -u sec02_ai /usr/bin/id -u)" = 5912
+          if /usr/bin/id -Gn sec02_ai | /usr/bin/grep -Eq '(^|[[:space:]])admin($|[[:space:]])'; then
+            echo "AI_ADMIN_GROUP=FAIL"
+            exit 1
+          fi
+          if /usr/bin/sudo -n -u sec02_ai /usr/bin/sudo -n /usr/bin/id -u >/dev/null 2>&1; then
+            echo "AI_PASSWORDLESS_SUDO=FAIL"
+            exit 1
+          fi
+          echo "IDENTITY_SEPARATION=PASS"
+
+          /bin/mkdir "$work/vault" "$work/endpoint"
+          /usr/bin/sudo -n /usr/sbin/chown 5911:20 "$work/vault" "$work/endpoint"
+          /usr/bin/sudo -n /bin/chmod 0700 "$work/vault"
+          /usr/bin/sudo -n /bin/chmod 0755 "$work/endpoint"
+          memory="$work/vault/MEMORY.md"
+          /usr/bin/sudo -n -u sec02_memowner /bin/sh -c 'printf "SYNTHETIC_ONLY:alpha\n" > "$1"; mkdir -m 700 "$2"' sh "$memory" "$work/vault/claims"
+          /usr/bin/sudo -n /bin/chmod 0600 "$memory"
+          socket="$work/endpoint/broker.sock"
+
+          if /usr/bin/sudo -n -u sec02_ai /usr/bin/python3 -c 'import sys;authorized=True;open(sys.argv[1],"w").write("bad")' "$memory" >/dev/null 2>&1; then
+            echo "DIRECT_AI_AUTH_TRUE=FAIL_ALLOWED"
+            exit 1
+          fi
+          echo "DIRECT_AI_AUTH_TRUE=PASS_DENIED"
+
+          /usr/bin/sudo -n -u sec02_memowner /usr/bin/python3 "$script" serve "$work" 5912 5911 > "$work/broker.log" 2>&1 &
+          pid=$!
+          for _ in $(/usr/bin/seq 1 80); do
+            test -S "$socket" && break
+            /bin/sleep 0.25
+          done
+          if ! test -S "$socket"; then
+            echo "BROKER_READY=FAIL"
+            /bin/cat "$work/broker.log"
+            exit 1
+          fi
+          echo "BROKER_READY=PASS"
+
+          check() {
+            /usr/bin/python3 -c 'import json,sys;d=json.loads(sys.argv[1]);k=sys.argv[2];v=sys.argv[3];assert str(d.get(k))==v,(k,d)' "$1" "$2" "$3"
+          }
+          read_owner() {
+            /usr/bin/sudo -n -u sec02_memowner /bin/cat "$memory"
+          }
+          unchanged() {
+            test "$(read_owner)" = "$1"
+          }
+
+          proposal="$(/usr/bin/sudo -n -u sec02_ai /usr/bin/python3 "$script" call "$socket" '{"op":"propose","after":"SYNTHETIC_ONLY:beta\n"}')"
+          check "$proposal" ok True
+          id="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["id"])' "$proposal")"
+          fp="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["fingerprint"])' "$proposal")"
+          unchanged "SYNTHETIC_ONLY:alpha"
+          echo "UNAPPROVED_PROPOSAL_NO_WRITE=PASS"
+
+          forged="$(/usr/bin/sudo -n -u sec02_ai /usr/bin/python3 "$script" call "$socket" "{\"op\":\"approve\",\"id\":\"$id\",\"fingerprint\":\"$fp\",\"authorized\":true,\"claimed_uid\":5911}")"
+          check "$forged" error UNAUTHORIZED_APPROVER
+          echo "FORGED_APPROVER_IDENTITY=PASS_DENIED"
+
+          forged_review="$(/usr/bin/sudo -n -u sec02_ai /usr/bin/python3 "$script" call "$socket" "{\"op\":\"review\",\"id\":\"$id\",\"authorized\":true,\"claimed_uid\":5911}")"
+          check "$forged_review" error UNAUTHORIZED_APPROVER
+          unchanged "SYNTHETIC_ONLY:alpha"
+          echo "AI_CANNOT_REVIEW_OR_APPROVE=PASS"
+
+          reviewed="$(/usr/bin/sudo -n -u sec02_memowner /usr/bin/python3 "$script" call "$socket" "{\"op\":\"review\",\"id\":\"$id\"}")"
+          /usr/bin/python3 -c 'import json,sys;x=json.loads(sys.argv[1]);assert x["ok"] and x["fingerprint"]==sys.argv[2] and x["record"]["before"]=="SYNTHETIC_ONLY:alpha\n" and x["record"]["after"]=="SYNTHETIC_ONLY:beta\n"' "$reviewed" "$fp"
+          echo "OWNER_EXACT_SNAPSHOT_REVIEW=PASS"
+
+          mismatch="$(/usr/bin/sudo -n -u sec02_memowner /usr/bin/python3 "$script" call "$socket" "{\"op\":\"approve\",\"id\":\"$id\",\"fingerprint\":\"wrong\",\"authorized\":true}")"
+          check "$mismatch" error FINGERPRINT_MISMATCH
+          unchanged "SYNTHETIC_ONLY:alpha"
+          echo "ALTERED_FINGERPRINT_NO_WRITE=PASS"
+
+          approved="$(/usr/bin/sudo -n -u sec02_memowner /usr/bin/python3 "$script" call "$socket" "{\"op\":\"approve\",\"id\":\"$id\",\"fingerprint\":\"$fp\"}")"
+          check "$approved" applied True
+          unchanged "SYNTHETIC_ONLY:beta"
+          echo "OWNER_APPROVAL_APPLIED_EXACTLY_ONCE=PASS"
+
+          replay="$(/usr/bin/sudo -n -u sec02_memowner /usr/bin/python3 "$script" call "$socket" "{\"op\":\"approve\",\"id\":\"$id\",\"fingerprint\":\"$fp\"}")"
+          check "$replay" error ALREADY_CLAIMED
+          unchanged "SYNTHETIC_ONLY:beta"
+          echo "OWNER_REPLAY=PASS_DENIED"
+
+          new_proposal="$(/usr/bin/sudo -n -u sec02_ai /usr/bin/python3 "$script" call "$socket" '{"op":"propose","after":"SYNTHETIC_ONLY:gamma\n"}')"
+          check "$new_proposal" ok True
+          unchanged "SYNTHETIC_ONLY:beta"
+          echo "SECOND_PROPOSAL_DOES_NOT_INHERIT_APPROVAL=PASS"
+
+          echo "SEC02_RESULT=PASS_SYNTHETIC_KERNEL_PEER_IDENTITY_AND_ONE_USE_ONLY"
+          echo "NOT_VERIFIED=real_human_presence,secure_UI,macOS_27,Hermes_integration,production_service,crash_recovery,other_tool_capabilities"
