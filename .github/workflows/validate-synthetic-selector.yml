@@ -1,0 +1,59 @@
+name: Validate synthetic authorised staging selector
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/validate-synthetic-selector.yml
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  selector-protocol-fixtures:
+    name: Selector staging and byte-only handoff (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out public synthetic lab
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Execute isolated selector, producer, receiver fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s synthetic-handoff -p 'test_*.py' -v
+      - name: State boundary
+        if: success()
+        shell: bash
+        run: |
+          echo "SYNTHETIC_STAGING_TESTS_PASS: no personal data or production access."
+          echo "Validation only covers pre-authorised fictional source roots and cooperative private parents."
+          echo "NOT PROVEN: Mac mini isolation, S10 zero contact, origin provenance, hostile-same-UID races, full crash durability."
+
+  linux-os-identity:
+    name: Distinct Linux identities with synthetic root-protected file
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out public synthetic lab
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run disposable fake-identity staging and handoff
+        shell: bash
+        run: bash synthetic-handoff/os-identity-selector-fixture.sh
+      - name: State restricted validity
+        if: success()
+        shell: bash
+        run: |
+          echo "SYNTHETIC_UID_STAGING_PASS: fake protected root-owned inode denied; allowlisted data copied and reconstructed."
+          echo "Not a safe source selector for actual OpenClaw, nor Mac mini or S10 NO-CONTACT evidence."
+          echo "Real backup, restore, upgrade remain NO-GO."
