@@ -1,4 +1,5 @@
 name: Validate synthetic authorised staging selector
+# Rerun after isolating Python's public import directory from fixture paths.
 
 on:
   push:
