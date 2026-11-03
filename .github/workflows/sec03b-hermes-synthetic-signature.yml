@@ -79,8 +79,8 @@ jobs:
           /usr/bin/sudo -n /usr/sbin/chown 5941:20 "$work/vault" "$work/requests"
           /usr/bin/sudo -n /usr/sbin/chown 5942:20 "$work/signer"
           /usr/bin/sudo -n /usr/sbin/chown 5943:20 "$work/ai"
-          /bin/chmod 0700 "$work/vault" "$work/signer" "$work/ai"
-          /bin/chmod 0755 "$work/requests"
+          /usr/bin/sudo -n /bin/chmod 0700 "$work/vault" "$work/signer" "$work/ai"
+          /usr/bin/sudo -n /bin/chmod 0755 "$work/requests"
 
           /usr/bin/sudo -n -u sec03b_signer /usr/bin/openssl ecparam -name prime256v1 -genkey -noout -out "$work/signer/private.pem"
           /usr/bin/sudo -n -u sec03b_signer /bin/chmod 0600 "$work/signer/private.pem"
