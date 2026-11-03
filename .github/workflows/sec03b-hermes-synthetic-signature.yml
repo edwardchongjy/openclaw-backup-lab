@@ -1,0 +1,153 @@
+name: SEC-03B-S Hermes synthetic signed approval contract
+# No schedule; only the workflow's own path triggers the cloud fixture.
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/sec03b-hermes-synthetic-signature.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-signature:
+    name: Synthetic P-256 signature and one-use memory approval
+    runs-on: macos-26
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Verify signature contract under three non-admin identities
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "HOST_CONTROL=PASS_MACOS_ARM64"
+
+          broker="$GITHUB_WORKSPACE/tests/sec02_hermes_synthetic_approval_broker.py"
+          contract="$GITHUB_WORKSPACE/tests/sec03b_hermes_synthetic_signature_contract.py"
+          test -f "$broker" && test -f "$contract"
+          /usr/bin/python3 -m py_compile "$broker" "$contract"
+          echo "CONTRACT_SYNTAX=PASS"
+
+          for name in sec03b_owner sec03b_signer sec03b_ai; do
+            if /usr/bin/dscl . -read "/Users/$name" >/dev/null 2>&1; then
+              echo "ACCOUNT_COLLISION=BLOCKED"; exit 2
+            fi
+          done
+          for uid in 5941 5942 5943; do
+            if /usr/bin/dscl . -list /Users UniqueID | /usr/bin/awk -v id="$uid" '$2 == id {hit=1} END {exit !hit}'; then
+              echo "UID_COLLISION=BLOCKED"; exit 2
+            fi
+          done
+
+          work="$(/usr/bin/mktemp -d /private/tmp/hermes-sec03b.XXXXXXXX)"
+          cleanup() {
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec03b_ai >/dev/null 2>&1 || true
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec03b_signer >/dev/null 2>&1 || true
+            /usr/bin/sudo -n /usr/bin/dscl . -delete /Users/sec03b_owner >/dev/null 2>&1 || true
+            if [[ "$work" == /private/tmp/hermes-sec03b.* ]]; then
+              /usr/bin/sudo -n /bin/rm -rf "$work" || true
+            fi
+          }
+          trap cleanup EXIT
+
+          for pair in sec03b_owner:5941 sec03b_signer:5942 sec03b_ai:5943; do
+            IFS=: read -r name uid <<< "$pair"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" UserShell /bin/sh
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" RealName "Synthetic SEC-03B Fixture"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" UniqueID "$uid"
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" PrimaryGroupID 20
+            /usr/bin/sudo -n /usr/bin/dscl . -create "/Users/$name" NFSHomeDirectory "$work/$name"
+            test "$(/usr/bin/sudo -n -u "$name" /usr/bin/id -u)" = "$uid"
+            if /usr/bin/id -Gn "$name" | /usr/bin/grep -Eq '(^|[[:space:]])admin($|[[:space:]])'; then
+              echo "UNEXPECTED_ADMIN_GROUP=FAIL"; exit 1
+            fi
+          done
+          if /usr/bin/sudo -n -u sec03b_ai /usr/bin/sudo -n /usr/bin/id -u >/dev/null 2>&1; then
+            echo "AI_SUDO=FAIL"; exit 1
+          fi
+          echo "THREE_DISTINCT_NONADMIN_IDENTITIES=PASS"
+
+          /bin/chmod 0755 "$work"
+          /bin/mkdir "$work/vault" "$work/requests" "$work/signer" "$work/ai"
+          /usr/bin/sudo -n /usr/sbin/chown 5941:20 "$work/vault" "$work/requests"
+          /usr/bin/sudo -n /usr/sbin/chown 5942:20 "$work/signer"
+          /usr/bin/sudo -n /usr/sbin/chown 5943:20 "$work/ai"
+          /bin/chmod 0700 "$work/vault" "$work/signer" "$work/ai"
+          /bin/chmod 0755 "$work/requests"
+
+          /usr/bin/sudo -n -u sec03b_signer /usr/bin/openssl ecparam -name prime256v1 -genkey -noout -out "$work/signer/private.pem"
+          /usr/bin/sudo -n -u sec03b_signer /bin/chmod 0600 "$work/signer/private.pem"
+          /usr/bin/sudo -n -u sec03b_signer /usr/bin/openssl pkey -in "$work/signer/private.pem" -pubout -out "$work/signer/public.pem"
+          /usr/bin/sudo -n /bin/cp "$work/signer/public.pem" "$work/vault/public.pem"
+          /usr/bin/sudo -n /usr/sbin/chown 5941:20 "$work/vault/public.pem"
+          /usr/bin/sudo -n /bin/chmod 0600 "$work/vault/public.pem"
+          if /usr/bin/sudo -n -u sec03b_ai /bin/cat "$work/signer/private.pem" >/dev/null 2>&1; then
+            echo "AI_PRIVATE_KEY_ACCESS=FAIL"; exit 1
+          fi
+          echo "AI_PRIVATE_KEY_ACCESS=PASS_DENIED"
+
+          /usr/bin/sudo -n -u sec03b_owner /usr/bin/python3 "$contract" prepare "$work" - "$broker"
+          if /usr/bin/sudo -n -u sec03b_ai /usr/bin/python3 -c 'from pathlib import Path;import sys;Path(sys.argv[1]).write_text("SYNTHETIC_ONLY:bad")' "$work/vault/valid/MEMORY.md" >/dev/null 2>&1; then
+            echo "AI_DIRECT_WRITE=FAIL"; exit 1
+          fi
+          echo "AI_DIRECT_WRITE=PASS_DENIED"
+
+          for name in valid tampered id_swap expired too_future wrong_audience wrong_target stale; do
+            /usr/bin/sudo -n -u sec03b_signer /usr/bin/openssl dgst -sha256 -sign "$work/signer/private.pem" -out "$work/signer/$name.sig" "$work/requests/$name.signed.json"
+            /usr/bin/sudo -n /bin/cp "$work/signer/$name.sig" "$work/requests/$name.sig"
+            /usr/bin/sudo -n /usr/sbin/chown 5941:20 "$work/requests/$name.sig"
+            /bin/chmod 0644 "$work/requests/$name.sig"
+          done
+
+          /usr/bin/sudo -n -u sec03b_ai /usr/bin/openssl ecparam -name prime256v1 -genkey -noout -out "$work/ai/fake.pem"
+          /usr/bin/sudo -n -u sec03b_ai /usr/bin/openssl dgst -sha256 -sign "$work/ai/fake.pem" -out "$work/ai/forged.sig" "$work/requests/forged.json"
+          /usr/bin/sudo -n /bin/cp "$work/ai/forged.sig" "$work/requests/forged.sig"
+          /usr/bin/sudo -n /usr/sbin/chown 5941:20 "$work/requests/forged.sig"
+          /bin/chmod 0644 "$work/requests/forged.sig"
+          if /usr/bin/sudo -n -u sec03b_ai /usr/bin/openssl dgst -sha256 -sign "$work/signer/private.pem" -out "$work/ai/stolen.sig" "$work/requests/valid.json" >/dev/null 2>&1; then
+            echo "AI_STOLEN_SIGNING=FAIL"; exit 1
+          fi
+          echo "AI_STOLEN_SIGNING=PASS_DENIED"
+
+          invoke() {
+            /usr/bin/sudo -n -u sec03b_owner /usr/bin/python3 "$contract" verify "$work" "$1" "$broker"
+          }
+          check_error() {
+            /usr/bin/python3 -c 'import json,sys;d=json.loads(sys.argv[1]);assert d.get("ok") is False and d.get("error")==sys.argv[2],d' "$1" "$2"
+          }
+          reject() {
+            local name="$1" error="$2" got expect
+            got="$(invoke "$name")"
+            check_error "$got" "$error"
+            expect="SYNTHETIC_ONLY:alpha"
+            if test "$name" = stale; then expect="SYNTHETIC_ONLY:external"; fi
+            test "$(/usr/bin/sudo -n -u sec03b_owner /bin/cat "$work/vault/$name/MEMORY.md")" = "$expect"
+            echo "$name=PASS_DENIED_$error"
+          }
+          reject forged INVALID_SIGNATURE
+          reject missing MISSING_SIGNATURE
+          reject tampered INVALID_SIGNATURE
+          reject id_swap INVALID_SIGNATURE
+          reject expired EXPIRED
+          reject too_future INVALID_VALIDITY_WINDOW
+          reject wrong_audience WRONG_SCOPE
+          reject wrong_target WRONG_SCOPE
+          reject stale STALE_BEFORE
+
+          answer="$(invoke valid)"
+          /usr/bin/python3 -c 'import json,sys;d=json.loads(sys.argv[1]);assert d.get("ok") is True and d.get("applied") is True,d' "$answer"
+          test "$(/usr/bin/sudo -n -u sec03b_owner /bin/cat "$work/vault/valid/MEMORY.md")" = "SYNTHETIC_ONLY:beta"
+          echo "VALID_SIGNED_APPROVAL=PASS_APPLIED_ONCE"
+          replay="$(invoke valid)"
+          check_error "$replay" ALREADY_CLAIMED
+          test "$(/usr/bin/sudo -n -u sec03b_owner /bin/cat "$work/vault/valid/MEMORY.md")" = "SYNTHETIC_ONLY:beta"
+          echo "REPLAY_IN_NEW_PROCESS=PASS_DENIED"
+          echo "SEC03B_SYNTHETIC_SIGNATURE_RESULT=PASS"
+          echo "NOT_VERIFIED=iPhone,Secure_Enclave,Face_ID,human_UI,Hermes,macOS_27,power_loss"
