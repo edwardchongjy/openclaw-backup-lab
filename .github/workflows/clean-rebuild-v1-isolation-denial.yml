@@ -100,3 +100,95 @@ jobs:
           fi
           echo "NETWORK_NAMESPACE=PASS"
           echo "ONLY_SYNTHETIC_BOUNDARY_PROOF; NO_OPENCLAW_AGENT_RUN; PRODUCTION_NO_GO"
+
+  restricted-real-openclaw:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Fetch pinned public OpenClaw without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - name: Set up pinned Node action
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.16.0"
+      - name: Prepare public runtime before entering no-network namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git -C upstream rev-parse HEAD)" = 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          node -e 'if(require("./upstream/package.json").version!=="2026.10.5")process.exit(1)'
+          npm install --global pnpm@12.9.0
+          pnpm -C upstream install --frozen-lockfile
+          env -i PATH="$PATH" HOME="/tmp" CI=true pnpm -C upstream openclaw --version
+          echo "PINNED_PUBLIC_RUNTIME_PREPARED=PASS"
+      - name: Run actual OpenClaw Agent CLI as unprivileged UID without external network
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          root="/tmp/clean-v1-real-agent-$GITHUB_RUN_ID"
+          test ! -e "$root"
+          sudo install -d -m 0755 "$root"
+          sudo install -d -m 0700 "$root/protected"
+          echo "FICTIONAL_DENIED_ONLY" | sudo tee "$root/protected/forbidden.txt" > /dev/null
+          sudo chmod 0600 "$root/protected/forbidden.txt"
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin ci_real_agent
+          for d in home state workspace tmp cache; do
+            sudo install -d -m 0700 -o ci_real_agent -g ci_real_agent "$root/$d"
+          done
+          cat > "$root/isolated-run.sh" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="$1"
+          upstream="$2"
+          pathenv="$3"
+          ip link set lo up
+          test -z "$(ip -4 route show default)"
+          test -z "$(ip -6 route show default)"
+          test -z "$(ip -o -4 addr show scope global)"
+          test -z "$(ip -o -6 addr show scope global)"
+          runuser -u ci_real_agent -- python3 - "$root" <<'PY'
+          import pathlib,socket,errno,os,sys
+          root=pathlib.Path(sys.argv[1])
+          assert os.getuid()!=0
+          try: (root/"protected/forbidden.txt").read_text()
+          except PermissionError: print("REAL_AGENT_UID_DENIED_FAKE_PROTECTED_FILE=PASS",flush=True)
+          else: raise AssertionError("unapproved protected synthetic read")
+          sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+          sock.settimeout(1)
+          try: code=sock.connect_ex(("192.0.2.1",443))
+          finally: sock.close()
+          assert code in (errno.ENETUNREACH,errno.EHOSTUNREACH)
+          print("REAL_AGENT_NAMESPACE_OUTBOUND_DENIED=PASS",flush=True)
+          PY
+          oc() {
+            runuser -u ci_real_agent -- env -i PATH="$pathenv" HOME="$root/home" \
+              TMPDIR="$root/tmp" XDG_CONFIG_HOME="$root/home/.config" \
+              XDG_CACHE_HOME="$root/cache" OPENCLAW_HOME="$root/home" \
+              OPENCLAW_STATE_DIR="$root/state" \
+              OPENCLAW_CONFIG_PATH="$root/state/openclaw.json" \
+              OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 \
+              pnpm -C "$upstream" openclaw "$@"
+          }
+          oc setup --baseline --skip-bootstrap --workspace "$root/workspace" --json > "$root/setup.json"
+          oc agents add ci-restricted --workspace "$root/workspace/ci-restricted" --non-interactive --json > "$root/created.json"
+          oc agents list --json > "$root/agents.json"
+          python3 - "$root/agents.json" <<'PY'
+          import json,sys
+          rows=json.load(open(sys.argv[1]))
+          assert isinstance(rows,list) and any(a.get("id")=="ci-restricted" for a in rows)
+          print("REAL_OPENCLAW_AGENT_REGISTERED_WITHOUT_EGRESS=PASS",flush=True)
+          PY
+          echo "REAL_OPENCLAW_RESTRICTED_CLI=PASS"
+          SH
+          sudo chown root:root "$root/isolated-run.sh"
+          sudo chmod 0644 "$root/isolated-run.sh"
+          sudo unshare --net --fork -- bash "$root/isolated-run.sh" "$root" "$GITHUB_WORKSPACE/upstream" "$PATH"
+          echo "RESTRICTED_AGENT_SYNTHETIC_ONLY=PASS"
+          echo "NO_MODEL_INFERENCE; NO_PRODUCTION_ACCESS; G0_G7_NO_GO"
