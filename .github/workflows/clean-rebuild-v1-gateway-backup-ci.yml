@@ -339,8 +339,10 @@ jobs:
           import json,pathlib
           root=pathlib.Path("/tmp/openclaw-clean-v1-restore")
           data=json.loads((root/"fictional-agent-turn.json").read_text())
-          answers=data.get("payloads",[]) if isinstance(data,dict) else []
+          result=data.get("result",{}) if isinstance(data,dict) else {}
+          answers=result.get("payloads",[]) if isinstance(result,dict) else []
           print("DIAGNOSTIC_AGENT_RESULT_KEYS=", sorted(data.keys()) if isinstance(data,dict) else type(data).__name__,flush=True)
+          print("DIAGNOSTIC_NESTED_RESULT_KEYS=",sorted(result.keys()) if isinstance(result,dict) else type(result).__name__,flush=True)
           print("DIAGNOSTIC_AGENT_TEXT=", [str(x.get("text",""))[:400] for x in answers] if isinstance(answers,list) else "not-list",flush=True)
           print("DIAGNOSTIC_AGENT_STATUS=",data.get("status") if isinstance(data,dict) else "not-object",flush=True)
           print("DIAGNOSTIC_AGENT_META=",str(data.get("meta",{}))[:650] if isinstance(data,dict) else "none",flush=True)
