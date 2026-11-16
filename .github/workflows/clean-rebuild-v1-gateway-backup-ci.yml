@@ -340,6 +340,11 @@ jobs:
           root=pathlib.Path("/tmp/openclaw-clean-v1-restore")
           data=json.loads((root/"fictional-agent-turn.json").read_text())
           answers=data.get("payloads",[]) if isinstance(data,dict) else []
+          print("DIAGNOSTIC_AGENT_RESULT_KEYS=", sorted(data.keys()) if isinstance(data,dict) else type(data).__name__,flush=True)
+          print("DIAGNOSTIC_AGENT_TEXT=", [str(x.get("text",""))[:400] for x in answers] if isinstance(answers,list) else "not-list",flush=True)
+          print("DIAGNOSTIC_AGENT_STATUS=",data.get("status") if isinstance(data,dict) else "not-object",flush=True)
+          print("DIAGNOSTIC_AGENT_META=",str(data.get("meta",{}))[:650] if isinstance(data,dict) else "none",flush=True)
+          print("DIAGNOSTIC_FAKE_SERVER_REQUEST=", (root/"fictional-model-hit.txt").exists(),flush=True)
           assert any("FICTION_ONLY_AGENT_REPLY_1479" in x.get("text","") for x in answers), "Agent final answer missing"
           assert (root/"fictional-model-hit.txt").read_text().strip()=="FICTIONAL_REQUEST_SEEN", "No real local model request"
           print("RESTORED_AGENT_COMPLETE_FAKE_TURN=PASS")
