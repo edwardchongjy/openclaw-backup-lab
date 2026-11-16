@@ -27,7 +27,7 @@ jobs:
           printf 'FICTIONAL_DENIED_ONLY\n' > "$root/protected/forbidden.txt"
           ln -s "$root/protected/forbidden.txt" "$root/allow/symlink.txt"
           ln "$root/protected/forbidden.txt" "$root/allow/hardlink.txt"
-          sudo chown root:root "$root" "$root/allow" "$root/protected" "$root/allow/approved.txt" "$root/protected/forbidden.txt" "$root/allow/hardlink.txt"
+          sudo chown root:root "$root/allow" "$root/protected" "$root/allow/approved.txt" "$root/protected/forbidden.txt" "$root/allow/hardlink.txt"
           sudo chmod 0755 "$root" "$root/allow"
           sudo chmod 0700 "$root/protected"
           sudo chmod 0644 "$root/allow/approved.txt"
@@ -84,6 +84,7 @@ jobs:
           print("SYNTHETIC_BOUNDARY_PROOF=PASS",flush=True)
           PY
           chmod 0644 "$root/prove.py"
+          sudo chown root:root "$root" "$root/prove.py"
           sudo -u ci_fiction_agent python3 "$root/prove.py" "$root"
           echo "SEPARATE_UID_FILE_DENIAL=PASS"
           if ! sudo unshare --net --fork -- bash -euo pipefail -c '
