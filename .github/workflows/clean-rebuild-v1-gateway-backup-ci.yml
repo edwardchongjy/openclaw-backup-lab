@@ -58,7 +58,17 @@ jobs:
             env -i PATH="$PATH" HOME="$root/home" TMPDIR="$root/tmp" XDG_CONFIG_HOME="$root/home/.config" XDG_CACHE_HOME="$root/cache" OPENCLAW_HOME="$root/home" OPENCLAW_STATE_DIR="$root/state" OPENCLAW_CONFIG_PATH="$root/state/openclaw.json" OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 pnpm -C upstream openclaw "$@"
           }
           oc setup --baseline --skip-bootstrap --workspace "$root/workspace" --json > "$root/setup.json"
+          # Create a brand-new fictional Agent. No credentials, channels or external providers.
+          oc agents add ci-fixture --workspace "$root/workspace/ci-fixture" --non-interactive --json > "$root/agent-created.json"
+          oc agents list --json > "$root/agents-before.json"
+          python3 - <<'PY'
+          import json
+          rows=json.load(open("/tmp/openclaw-clean-v1/agents-before.json"))
+          assert isinstance(rows,list) and any(a.get("id")=="ci-fixture" and a.get("status")!="degraded" for a in rows)
+          print("NEW_FICTIONAL_AGENT_REGISTERED=PASS")
+          PY
           printf "PUBLIC FICTION ONLY - NO USER DATA\n" > "$root/workspace/fixture.txt"
+          printf "CI FICTIONAL AGENT WORKSPACE\n" > "$root/workspace/ci-fixture/ci-fixture.txt"
           oc backup create --dry-run --json > "$root/plan.json"
           python3 - <<'PY'
           import json, pathlib
@@ -172,5 +182,79 @@ jobs:
           echo FICTION > "$root/nonempty/file.txt"
           if oc backup restore "$archive" --target "$root/nonempty" > /dev/null 2>&1; then echo "NONEMPTY_RESTORE=FAIL"; exit 1; fi
           echo "NEGATIVE_RESTORE_INPUTS=PASS"
-          echo "ACTIVATE_RESTORED_STATE_AND_AGENT_FUNCTION=NOT_TESTED"
+          echo "NEGATIVE_ARCHIVE_CHECKS=PASS"
+          echo "PRODUCTION_BACKUP_RESTORE_UPGRADE=NO_GO"
+
+      - name: Activate only restored fictional state and verify Agent registration and Gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          root=/tmp/openclaw-clean-v1-restore
+          active=/tmp/openclaw-clean-v1
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test ! -e "$active"
+          # The pinned archive format stores absolute POSIX sources under payload/posix/.
+          # Locate the one verified, newly extracted archive root; never inspect outside scratch.
+          count="$(find "$root/restored" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+          test "$count" -eq 1
+          extracted="$(find "$root/restored" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          source="$extracted/payload/posix/tmp/openclaw-clean-v1"
+          test -f "$source/state/openclaw.json"
+          test -f "$source/workspace/fixture.txt"
+          test -f "$source/workspace/ci-fixture/ci-fixture.txt"
+          # Avoid copying any link or other source outside the expected synthetic tree.
+          test -z "$(find "$source/state" "$source/workspace" -type l -print -quit)"
+          mkdir -m 0700 "$active"
+          cp -a "$source/state" "$source/workspace" "$active/"
+          for d in home cache tmp; do mkdir -m 0700 "$active/$d"; done
+          test "$(cat "$active/workspace/ci-fixture/ci-fixture.txt")" = "CI FICTIONAL AGENT WORKSPACE"
+          echo "RESTORED_SYNTHETIC_STATE_ACTIVATED=PASS"
+
+          oc() {
+            env -i PATH="$PATH" HOME="$active/home" TMPDIR="$active/tmp" XDG_CONFIG_HOME="$active/home/.config" XDG_CACHE_HOME="$active/cache" OPENCLAW_HOME="$active/home" OPENCLAW_STATE_DIR="$active/state" OPENCLAW_CONFIG_PATH="$active/state/openclaw.json" OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 pnpm -C upstream openclaw "$@"
+          }
+          oc agents list --json > "$root/agents-after.json"
+          python3 - <<'PY'
+          import json
+          rows=json.load(open("/tmp/openclaw-clean-v1-restore/agents-after.json"))
+          assert isinstance(rows,list)
+          matches=[a for a in rows if a.get("id")=="ci-fixture"]
+          assert len(matches)==1 and matches[0].get("status")!="degraded", "Agent missing or degraded after restore"
+          assert matches[0].get("workspace")=="/tmp/openclaw-clean-v1/workspace/ci-fixture", "Agent workspace changed"
+          print("RESTORED_AGENT_REGISTRATION=PASS")
+          PY
+
+          oc gateway run --port 18991 --bind loopback --auth token --token PUBLIC-TEST-TOKEN-NOT-SECRET > "$root/activated-gateway.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for n in $(seq 1 45); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18991/healthz > /dev/null 2>&1; then ready=1; break; fi
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          if test "$ready" -ne 1; then
+            echo "RESTORED_GATEWAY_START=FAIL"
+            tail -n 20 "$root/activated-gateway.log"
+            exit 1
+          fi
+          ss -ltnH '( sport = :18991 )' > "$root/activated-listeners.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          rows=Path("/tmp/openclaw-clean-v1-restore/activated-listeners.txt").read_text().splitlines()
+          assert rows and all("127.0.0.1:18991" in s or "::1:18991" in s or "[::1]:18991" in s for s in rows)
+          print("RESTORED_GATEWAY_LOOPBACK=PASS")
+          PY
+          oc gateway health --port 18991 --token PUBLIC-TEST-TOKEN-NOT-SECRET > "$root/activated-health.log"
+          oc gateway call agents.list --port 18991 --token PUBLIC-TEST-TOKEN-NOT-SECRET --json > "$root/gateway-roster.json"
+          python3 - <<'PY'
+          import json
+          x=json.load(open("/tmp/openclaw-clean-v1-restore/gateway-roster.json"))
+          roster=x.get("agents",[]) if isinstance(x,dict) else []
+          assert any(a.get("id")=="ci-fixture" for a in roster), "Gateway did not load restored fictional Agent"
+          print("RESTORED_GATEWAY_AGENT_ROSTER=PASS")
+          PY
+          echo "MODEL_INFERENCE_AND_REAL_MESSAGING=NOT_TESTED"
           echo "PRODUCTION_BACKUP_RESTORE_UPGRADE=NO_GO"
