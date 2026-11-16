@@ -60,6 +60,34 @@ jobs:
           oc setup --baseline --skip-bootstrap --workspace "$root/workspace" --json > "$root/setup.json"
           # Create a brand-new fictional Agent. No credentials, channels or external providers.
           oc agents add ci-fixture --workspace "$root/workspace/ci-fixture" --non-interactive --json > "$root/agent-created.json"
+          # The fake provider is loopback-only; its fixed placeholder is not a real credential.
+          # Declaring it before backup proves the restored config retains the route.
+          python3 - <<'PY'
+          import json, pathlib
+          p=pathlib.Path("/tmp/openclaw-clean-v1/state/openclaw.json")
+          data=json.loads(p.read_text())
+          data["models"]={
+              "mode":"replace",
+              "providers":{
+                  "ci-fake":{
+                      "baseUrl":"http://127.0.0.1:19042/v1",
+                      "apiKey":"FICTIONAL-PLACEHOLDER-NOT-A-KEY",
+                      "api":"openai-completions",
+                      "models":[{
+                          "id":"fake-echo","name":"Deterministic Fiction-only Stub",
+                          "reasoning":False,"input":["text"],
+                          "contextWindow":32768,"maxTokens":256,
+                          "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+                          "compat":{"supportsTools":False,"supportsUsageInStreaming":False}
+                      }]
+                  }
+              }
+          }
+          data.setdefault("agents",{}).setdefault("defaults",{})["model"]={"primary":"ci-fake/fake-echo"}
+          p.write_text(json.dumps(data,indent=2)+"\n")
+          print("FICTION_ONLY_LOCAL_MODEL_CONFIGURED=PASS")
+          PY
+          oc config validate
           oc agents list --json > "$root/agents-before.json"
           python3 - <<'PY'
           import json
@@ -256,5 +284,65 @@ jobs:
           assert any(a.get("id")=="ci-fixture" for a in roster), "Gateway did not load restored fictional Agent"
           print("RESTORED_GATEWAY_AGENT_ROSTER=PASS")
           PY
-          echo "MODEL_INFERENCE_AND_REAL_MESSAGING=NOT_TESTED"
+          # A loopback HTTP server returns exactly one fictional model response.
+          # It has no outside calls or genuine model access.
+          cat > "$root/fictional-model.py" <<'PY'
+          import json
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          from pathlib import Path
+          ROOT=Path("/tmp/openclaw-clean-v1-restore")
+          EXPECTED="CLEAN_ROOM_CI_PING_1479"
+          RESPONSE="FICTION_ONLY_AGENT_REPLY_1479"
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self,*args): pass
+              def do_GET(self):
+                  if self.path != "/v1/models":
+                      self.send_error(404); return
+                  raw=json.dumps({"object":"list","data":[{"id":"fake-echo","object":"model","owned_by":"ci-fake"}]}).encode()
+                  self.send_response(200); self.send_header("Content-Type","application/json")
+                  self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw)
+              def do_POST(self):
+                  if self.path != "/v1/chat/completions":
+                      self.send_error(404); return
+                  n=int(self.headers.get("Content-Length","0"))
+                  if n<=0 or n>2000000:
+                      self.send_error(413); return
+                  body=self.rfile.read(n)
+                  doc=json.loads(body)
+                  if doc.get("model")!="fake-echo" or EXPECTED not in body.decode():
+                      self.send_error(422); return
+                  (ROOT/"fictional-model-hit.txt").write_text("FICTIONAL_REQUEST_SEEN\n")
+                  chunks=[
+                    {"id":"chatcmpl-ci","object":"chat.completion.chunk","created":1,"model":"fake-echo","choices":[{"index":0,"delta":{"role":"assistant","content":RESPONSE},"finish_reason":None}]},
+                    {"id":"chatcmpl-ci","object":"chat.completion.chunk","created":1,"model":"fake-echo","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]},
+                  ]
+                  raw=("".join("data: "+json.dumps(ch)+"\n\n" for ch in chunks)+"data: [DONE]\n\n").encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type","text/event-stream")
+                  self.send_header("Content-Length",str(len(raw)))
+                  self.end_headers(); self.wfile.write(raw); self.wfile.flush()
+          ThreadingHTTPServer(("127.0.0.1",19042),Handler).serve_forever()
+          PY
+          python3 "$root/fictional-model.py" > "$root/fictional-model.log" 2>&1 &
+          fake_pid=$!
+          trap 'kill "$pid" "$fake_pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; wait "$fake_pid" 2>/dev/null || true' EXIT
+          for n in $(seq 1 25); do
+            if curl -fsS --max-time 2 http://127.0.0.1:19042/v1/models > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS --max-time 2 http://127.0.0.1:19042/v1/models > /dev/null
+          test -z "$(ss -ltnH '( sport = :19042 )' | grep -v '127.0.0.1:19042' || true)"
+          echo "LOCAL_ONLY_FAKE_AI=PASS"
+          oc agent --agent ci-fixture --message CLEAN_ROOM_CI_PING_1479 --json --timeout 60 \
+             > "$root/fictional-agent-turn.json"
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path("/tmp/openclaw-clean-v1-restore")
+          data=json.loads((root/"fictional-agent-turn.json").read_text())
+          answers=data.get("payloads",[]) if isinstance(data,dict) else []
+          assert any("FICTION_ONLY_AGENT_REPLY_1479" in x.get("text","") for x in answers), "Agent final answer missing"
+          assert (root/"fictional-model-hit.txt").read_text().strip()=="FICTIONAL_REQUEST_SEEN", "No real local model request"
+          print("RESTORED_AGENT_COMPLETE_FAKE_TURN=PASS")
+          PY
+          echo "REAL_AI_ACCOUNT_OR_INTERNET_MESSAGE=NOT_TESTED"
           echo "PRODUCTION_BACKUP_RESTORE_UPGRADE=NO_GO"
