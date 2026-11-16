@@ -241,7 +241,7 @@ jobs:
           echo "RESTORED_SYNTHETIC_STATE_ACTIVATED=PASS"
 
           oc() {
-            env -i PATH="$PATH" HOME="$active/home" TMPDIR="$active/tmp" XDG_CONFIG_HOME="$active/home/.config" XDG_CACHE_HOME="$active/cache" OPENCLAW_HOME="$active/home" OPENCLAW_STATE_DIR="$active/state" OPENCLAW_CONFIG_PATH="$active/state/openclaw.json" OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 pnpm -C upstream openclaw "$@"
+            env -i PATH="$PATH" HOME="$active/home" TMPDIR="$active/tmp" XDG_CONFIG_HOME="$active/home/.config" XDG_CACHE_HOME="$active/cache" OPENCLAW_HOME="$active/home" OPENCLAW_STATE_DIR="$active/state" OPENCLAW_CONFIG_PATH="$active/state/openclaw.json" OPENCLAW_GATEWAY_TOKEN=PUBLIC-TEST-TOKEN-NOT-SECRET OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 pnpm -C upstream openclaw "$@"
           }
           oc agents list --json > "$root/agents-after.json"
           python3 - <<'PY'
