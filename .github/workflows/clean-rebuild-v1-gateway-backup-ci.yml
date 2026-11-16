@@ -1,0 +1,176 @@
+name: Clean Rebuild v1 synthetic OpenClaw end-to-end
+
+on:
+  push:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths: [.github/workflows/clean-rebuild-v1-gateway-backup-ci.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  produce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Confirm independent host and no inherited app identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(id -u)" -ne 0
+          python3 - <<'PY'
+          import os
+          banned = ("HERMES_HOME","OPENCLAW_HOME","OPENCLAW_STATE_DIR","OPENCLAW_CONFIG_PATH","OPENAI_API_KEY","ANTHROPIC_API_KEY","DISCORD_BOT_TOKEN","TELEGRAM_BOT_TOKEN","OPENCLAW_GATEWAY_TOKEN")
+          assert not any(k in os.environ for k in banned), "ambient production state or auth"
+          print("OFF_HOST_NO_DECLARED_APP_CREDENTIALS=PASS")
+          PY
+
+      - name: Check out exact public upstream without retained credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+      - name: Install pinned public dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C upstream rev-parse HEAD)" = 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          node -e 'if(require("./upstream/package.json").version!=="2026.10.5")process.exit(1)'
+          npm install --global pnpm@12.9.0
+          pnpm -C upstream install --frozen-lockfile
+      - name: Create fictional data, run official archive verification, test Gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/openclaw-clean-v1
+          test ! -e "$root"
+          mkdir -m 0700 "$root"
+          for d in home state workspace cache tmp output; do mkdir -m 0700 "$root/$d"; done
+          oc() {
+            env -i PATH="$PATH" HOME="$root/home" TMPDIR="$root/tmp" XDG_CONFIG_HOME="$root/home/.config" XDG_CACHE_HOME="$root/cache" OPENCLAW_HOME="$root/home" OPENCLAW_STATE_DIR="$root/state" OPENCLAW_CONFIG_PATH="$root/state/openclaw.json" OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 pnpm -C upstream openclaw "$@"
+          }
+          oc setup --baseline --skip-bootstrap --workspace "$root/workspace" --json > "$root/setup.json"
+          printf "PUBLIC FICTION ONLY - NO USER DATA\n" > "$root/workspace/fixture.txt"
+          oc backup create --dry-run --json > "$root/plan.json"
+          python3 - <<'PY'
+          import json, pathlib
+          root=pathlib.Path("/tmp/openclaw-clean-v1")
+          assets=json.loads((root/"plan.json").read_text()).get("assets",[])
+          assert assets, "no backup sources"
+          for asset in assets:
+              source=asset.get("sourcePath")
+              assert isinstance(source,str) and pathlib.Path(source).resolve().is_relative_to(root), "out-of-scratch source rejected"
+          print("FRESH_SOURCE_COVERAGE=PASS")
+          PY
+          oc backup create --output "$root/output/fixture.tar.gz" --verify --json > "$root/create.json"
+          oc backup verify "$root/output/fixture.tar.gz" --json > "$root/verify.json"
+          python3 - <<'PY'
+          import tarfile, pathlib
+          arc=pathlib.Path("/tmp/openclaw-clean-v1/output/fixture.tar.gz")
+          with tarfile.open(arc,"r:gz") as tf:
+              members=tf.getmembers()
+              assert members and not any(m.name.startswith("/") or ".." in pathlib.PurePosixPath(m.name).parts for m in members)
+              found=[m for m in members if m.isfile() and m.name.endswith("/fixture.txt")]
+              assert len(found)==1 and tf.extractfile(found[0]).read()==b"PUBLIC FICTION ONLY - NO USER DATA\n"
+          print("OFFICIAL_ARCHIVE_WITH_SYNTHETIC_FIXTURE=PASS")
+          PY
+          (cd "$root/output" && sha256sum fixture.tar.gz > fixture.tar.gz.sha256)
+
+          # Start only after archive creation: test-only public token is not archived.
+          oc gateway run --port 18989 --bind loopback --auth token --token PUBLIC-TEST-TOKEN-NOT-SECRET > "$root/gateway.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for n in $(seq 1 45); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18989/healthz > /dev/null 2>&1; then ready=1; break; fi
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          if test "$ready" -ne 1; then echo "GATEWAY_LIVENESS=BLOCKED"; tail -n 20 "$root/gateway.log"; exit 1; fi
+          ss -ltnH '( sport = :18989 )' > "$root/listeners.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          lines=Path("/tmp/openclaw-clean-v1/listeners.txt").read_text().splitlines()
+          assert lines and all("127.0.0.1:18989" in s or "::1:18989" in s or "[::1]:18989" in s for s in lines), "non-loopback listener"
+          print("LOOPBACK_ONLY_GATEWAY=PASS")
+          PY
+          oc gateway health --port 18989 --token PUBLIC-TEST-TOKEN-NOT-SECRET > "$root/health.log"
+          if oc gateway health --port 18989 --token WRONG-PUBLIC-TEST-TOKEN > "$root/denied.log" 2>&1; then
+            echo "WRONG_TOKEN_REFUSAL=FAIL"; exit 1
+          fi
+          echo "GATEWAY_AUTH_NEGATIVE=PASS"
+
+      - name: Upload only synthetic archive and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-only-archive
+          path: |
+            /tmp/openclaw-clean-v1/output/fixture.tar.gz
+            /tmp/openclaw-clean-v1/output/fixture.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  restore:
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out pinned public upstream
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+      - name: Install pinned public dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git -C upstream rev-parse HEAD)" = 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          npm install --global pnpm@12.9.0
+          pnpm -C upstream install --frozen-lockfile
+      - name: Receive fictional artifact only
+        uses: actions/download-artifact@v4
+        with:
+          name: synthetic-only-archive
+          path: /tmp/openclaw-clean-v1-intake
+      - name: Verify, restore and reject corrupt/missing input
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/openclaw-clean-v1-restore
+          mkdir -m 0700 "$root"
+          for d in home state workspace cache tmp; do mkdir -m 0700 "$root/$d"; done
+          oc() {
+            env -i PATH="$PATH" HOME="$root/home" TMPDIR="$root/tmp" XDG_CONFIG_HOME="$root/home/.config" XDG_CACHE_HOME="$root/cache" OPENCLAW_HOME="$root/home" OPENCLAW_STATE_DIR="$root/state" OPENCLAW_CONFIG_PATH="$root/state/openclaw.json" OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 pnpm -C upstream openclaw "$@"
+          }
+          archive=/tmp/openclaw-clean-v1-intake/fixture.tar.gz
+          (cd /tmp/openclaw-clean-v1-intake && sha256sum --check fixture.tar.gz.sha256)
+          oc backup verify "$archive" --json > "$root/verify.json"
+          oc backup restore "$archive" --target "$root/restored" --json > "$root/restore.json"
+          marker="$(find "$root/restored" -type f -name fixture.txt -print -quit)"
+          test -n "$marker"
+          test "$(cat "$marker")" = "PUBLIC FICTION ONLY - NO USER DATA"
+          echo "INDEPENDENT_RUNNER_RESTORE=PASS"
+
+          head -c 128 "$archive" > "$root/corrupt.tar.gz"
+          if oc backup verify "$root/corrupt.tar.gz" > /dev/null 2>&1; then echo "CORRUPT_ARCHIVE=FAIL"; exit 1; fi
+          if oc backup verify "$root/missing.tar.gz" > /dev/null 2>&1; then echo "MISSING_ARCHIVE=FAIL"; exit 1; fi
+          mkdir -m 0700 "$root/nonempty"
+          echo FICTION > "$root/nonempty/file.txt"
+          if oc backup restore "$archive" --target "$root/nonempty" > /dev/null 2>&1; then echo "NONEMPTY_RESTORE=FAIL"; exit 1; fi
+          echo "NEGATIVE_RESTORE_INPUTS=PASS"
+          echo "ACTIVATE_RESTORED_STATE_AND_AGENT_FUNCTION=NOT_TESTED"
+          echo "PRODUCTION_BACKUP_RESTORE_UPGRADE=NO_GO"
