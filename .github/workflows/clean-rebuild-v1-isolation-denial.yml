@@ -142,6 +142,9 @@ jobs:
           for d in home state workspace tmp cache; do
             sudo install -d -m 0700 -o ci_real_agent -g ci_real_agent "$root/$d"
           done
+          # Copy only the already-pinned PUBLIC source and built dependencies into a distinct synthetic location.
+          sudo cp -a "$GITHUB_WORKSPACE/upstream" "$root/upstream"
+          sudo -u ci_real_agent test -r "$root/upstream/package.json"
           sudo tee "$root/isolated-run.sh" > /dev/null <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -189,6 +192,6 @@ jobs:
           SH
           sudo chown root:root "$root/isolated-run.sh"
           sudo chmod 0644 "$root/isolated-run.sh"
-          sudo unshare --net --fork -- bash "$root/isolated-run.sh" "$root" "$GITHUB_WORKSPACE/upstream" "$PATH"
+          sudo unshare --net --fork -- bash "$root/isolated-run.sh" "$root" "$root/upstream" "$PATH"
           echo "RESTRICTED_AGENT_SYNTHETIC_ONLY=PASS"
           echo "NO_MODEL_INFERENCE; NO_PRODUCTION_ACCESS; G0_G7_NO_GO"
