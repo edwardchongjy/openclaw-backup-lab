@@ -1,0 +1,101 @@
+name: Clean Rebuild v1 - synthetic isolation denial
+on:
+  push:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths: [.github/workflows/clean-rebuild-v1-isolation-denial.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  denial:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Verify new synthetic filesystem permissions and no-route network namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(id -u)" -ne 0
+          root="/tmp/clean-v1-isolation-$GITHUB_RUN_ID"
+          test ! -e "$root"
+          mkdir -m 0755 "$root" "$root/allow"
+          mkdir -m 0700 "$root/protected"
+          printf 'FICTIONAL_ALLOWED_ONLY\n' > "$root/allow/approved.txt"
+          printf 'FICTIONAL_DENIED_ONLY\n' > "$root/protected/forbidden.txt"
+          ln -s "$root/protected/forbidden.txt" "$root/allow/symlink.txt"
+          ln "$root/protected/forbidden.txt" "$root/allow/hardlink.txt"
+          sudo chown root:root "$root" "$root/allow" "$root/protected" "$root/allow/approved.txt" "$root/protected/forbidden.txt" "$root/allow/hardlink.txt"
+          sudo chmod 0755 "$root" "$root/allow"
+          sudo chmod 0700 "$root/protected"
+          sudo chmod 0644 "$root/allow/approved.txt"
+          sudo chmod 0600 "$root/protected/forbidden.txt"
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin ci_fiction_agent
+          test "$(id -u ci_fiction_agent)" -ne 0
+          cat > "$root/prove.py" <<'PY'
+          import errno, os, pathlib, shutil, socket, subprocess, sys, threading
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          root=pathlib.Path(sys.argv[1])
+          assert str(root).startswith("/tmp/clean-v1-isolation-")
+          assert os.getuid()!=0
+          assert (root/"allow/approved.txt").read_text()=="FICTIONAL_ALLOWED_ONLY\n"
+          print("ALLOWLIST_READ=PASS",flush=True)
+          for path in ("protected/forbidden.txt","allow/symlink.txt","allow/hardlink.txt"):
+              try: (root/path).read_bytes()
+              except PermissionError: print("DENIED_"+path.replace("/","_").upper()+"=PASS",flush=True)
+              else: raise AssertionError("unapproved synthetic read: "+path)
+          try: (root/"allow/approved.txt").write_text("BAD")
+          except PermissionError: print("DENIED_WRITE=PASS",flush=True)
+          else: raise AssertionError("unapproved write")
+          if shutil.which("sudo"):
+              assert subprocess.run(["sudo","-n","true"],capture_output=True,timeout=3).returncode!=0
+          print("NO_SUDO_ESCALATION=PASS",flush=True)
+          if len(sys.argv)>2 and sys.argv[2]=="network":
+              class Handler(BaseHTTPRequestHandler):
+                  def log_message(self,*args): pass
+                  def do_GET(self):
+                      self.send_response(200)
+                      self.send_header("Content-Length","2")
+                      self.end_headers()
+                      self.wfile.write(b"OK")
+              server=HTTPServer(("127.0.0.1",19042),Handler)
+              threading.Thread(target=server.serve_forever,daemon=True).start()
+              try:
+                  with socket.create_connection(("127.0.0.1",19042),timeout=2) as sock:
+                      sock.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                      assert b"200 OK" in sock.recv(4096)
+                  print("LOOPBACK_WORKS=PASS",flush=True)
+              finally:
+                  server.shutdown()
+                  server.server_close()
+              for family,ip in ((socket.AF_INET,"192.0.2.1"),(socket.AF_INET6,"2001:db8::1")):
+                  try:
+                      sock=socket.socket(family,socket.SOCK_STREAM)
+                      sock.settimeout(1)
+                      rc=sock.connect_ex((ip,443))
+                  except OSError as e: rc=e.errno
+                  finally:
+                      try: sock.close()
+                      except Exception: pass
+                  assert rc in (errno.ENETUNREACH,errno.EHOSTUNREACH,errno.EAFNOSUPPORT,errno.ENODEV), "nonlocal socket not demonstrably blocked: "+str(rc)
+                  print("OUTBOUND_"+("IPV4" if family==socket.AF_INET else "IPV6")+"_DENIED=PASS",flush=True)
+          print("SYNTHETIC_BOUNDARY_PROOF=PASS",flush=True)
+          PY
+          chmod 0644 "$root/prove.py"
+          sudo -u ci_fiction_agent python3 "$root/prove.py" "$root"
+          echo "SEPARATE_UID_FILE_DENIAL=PASS"
+          if ! sudo unshare --net --fork -- bash -euo pipefail -c '
+            ip link set lo up
+            test -z "$(ip -4 route show default)"
+            test -z "$(ip -6 route show default)"
+            test -z "$(ip -o -4 addr show scope global)"
+            test -z "$(ip -o -6 addr show scope global)"
+            runuser -u ci_fiction_agent -- python3 "$1/prove.py" "$1" network
+          ' _ "$root"; then
+            echo "NETWORK_NAMESPACE=BLOCKED"
+            exit 1
+          fi
+          echo "NETWORK_NAMESPACE=PASS"
+          echo "ONLY_SYNTHETIC_BOUNDARY_PROOF; NO_OPENCLAW_AGENT_RUN; PRODUCTION_NO_GO"
