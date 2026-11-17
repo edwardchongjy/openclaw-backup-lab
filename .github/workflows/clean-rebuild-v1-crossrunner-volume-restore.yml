@@ -1,0 +1,81 @@
+name: Clean Rebuild v1 - full isolated new-volume recovery across GitHub runners
+on:
+  push:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths:
+      - .github/workflows/clean-rebuild-v1-crossrunner-volume-restore.yml
+      - ci/clean-v1-crossrunner-driver.sh
+      - ci/clean-v1-crossrunner-fake-provider.mjs
+      - ci/clean-v1-crossrunner-pilot.mjs
+      - ci/clean-v1-crossrunner.Dockerfile
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  produce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    outputs:
+      sha256: ${{ steps.create.outputs.sha256 }}
+    steps:
+      - name: Checkout only the current PUBLIC test harness revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: lab
+          persist-credentials: false
+      - name: Checkout immutable upstream PUBLIC OpenClaw source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - name: Node 24.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.16.0"
+      - name: Build fictional installation, verify isolation and archive ONLY new volume
+        id: create
+        shell: bash
+        run: bash lab/ci/clean-v1-crossrunner-driver.sh produce
+      - name: Transfer only the bounded public fiction-only archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: clean-v1-fresh-fictional-state-${{ github.run_id }}
+          path: ${{ runner.temp }}/clean-v1-crossrunner-state.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+  restore:
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Retrieve fictional archive from separate producer job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: clean-v1-fresh-fictional-state-${{ github.run_id }}
+          path: ${{ runner.temp }}/recovery-input
+      - name: Checkout only the current PUBLIC test harness revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: lab
+          persist-credentials: false
+      - name: Checkout immutable upstream PUBLIC OpenClaw source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - name: Node 24.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.16.0"
+      - name: Verify independent digest and dangerous archives BEFORE extracting, then restore real Agent
+        shell: bash
+        env:
+          CI_EXPECTED_ARCHIVE_SHA: ${{ needs.produce.outputs.sha256 }}
+        run: bash lab/ci/clean-v1-crossrunner-driver.sh restore
