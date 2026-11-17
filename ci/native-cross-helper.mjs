@@ -60,9 +60,10 @@ if(mode==='seed'){
   console.log('RESTORED_FILE_SHA256 '+JSON.stringify(n)+' '+e.sha256);
  }
  const cfg=JSON.parse(fs.readFileSync(path.join(payload,'state/openclaw.json'),'utf8'));
- assert(cfg.agents.list.some(a=>a.id==='ci-contained'));
+ assert.equal(cfg.agents.defaults.model.primary,'ci-fake/fake-echo');
+ assert.equal(cfg.models.providers['ci-fake'].baseUrl,'http://127.0.0.1:19042/v1');
  console.log('SOURCE_AND_RESTORED_CORPUS_CONFIG_8_OF_8_SHA256_MATCH=PASS');
- console.log('RESTORED_CONFIG_RETAINS_FICTIONAL_AGENT=PASS');
+ console.log('RESTORED_CONFIG_RETAINS_FICTIONAL_MODEL_ROUTE=PASS');
  assert(!fs.existsSync(home+'/workspace'),'restore activated source workspace');
  console.log('RESTORE_STAGING_ONLY_NO_ACTIVATION=PASS');
 }else if(mode==='check-wrong-empty'||mode==='check-tamper-empty'){
