@@ -1,0 +1,137 @@
+name: Clean Rebuild v1 - fictional full-container boundary
+on:
+  push:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths: [.github/workflows/clean-rebuild-v1-container-boundary.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-no-host-mount:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Verify full-container file and network boundary with new fictional data only
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REPOSITORY" = edwardchongjy/openclaw-backup-lab
+          test "$GITHUB_REF" = refs/heads/lab/clean-rebuild-v1-gateway-backup-ci
+          test "$(id -u)" -ne 0
+          command -v go >/dev/null
+          command -v docker >/dev/null
+
+          # This test creates no OpenClaw state and never contacts any existing host.
+          # All markers below are fabricated on this disposable GitHub runner.
+          root="$RUNNER_TEMP/clean-v1-container-fiction-$GITHUB_RUN_ID"
+          test ! -e "$root"
+          mkdir -m 0700 "$root"
+          printf 'FAKE_RUNNER_ONLY_NOT_A_SECRET\n' > "$root/fictional-host-only.txt"
+          printf 'FICTIONAL_CONTAINER_APPROVED\n' > "$root/approved.txt"
+          cat > "$root/proof.go" <<'GO'
+          package main
+          import (
+            "fmt"
+            "net"
+            "os"
+            "strings"
+            "time"
+          )
+          func assert(ok bool, message string) {
+            if !ok { fmt.Fprintln(os.Stderr, "FAIL: "+message); os.Exit(1) }
+            fmt.Println(message+"=PASS")
+          }
+          func main() {
+            assert(os.Geteuid()==10001, "NON_ROOT_UID")
+            raw,err:=os.ReadFile("/approved.txt")
+            assert(err==nil && string(raw)=="FICTIONAL_CONTAINER_APPROVED\n","IMMUTABLE_FICTIONAL_INPUT_READ")
+            _,err=os.Stat(os.Getenv("HOST_SYNTHETIC_PATH"))
+            assert(os.IsNotExist(err),"HOST_ONLY_FICTION_NOT_VISIBLE")
+            err=os.WriteFile("/approved.txt",[]byte("MUTATED"),0600)
+            assert(err!=nil,"ROOT_FILESYSTEM_READ_ONLY")
+            err=os.WriteFile("/unsafe-new-file",[]byte("MUTATED"),0600)
+            assert(err!=nil,"NO_ROOTFS_WRITE")
+            err=os.WriteFile("/tmp/scratch.txt",[]byte("FICTION_ONLY"),0600)
+            assert(err==nil,"EXPLICIT_TMPFS_WRITE")
+            buf,err:=os.ReadFile("/tmp/scratch.txt")
+            assert(err==nil && string(buf)=="FICTION_ONLY","EXPLICIT_TMPFS_READ")
+
+            listener,err:=net.Listen("tcp4","127.0.0.1:19042")
+            assert(err==nil,"LOOPBACK_LISTENER")
+            defer listener.Close()
+            received:=make(chan bool,1)
+            go func(){
+              c,e:=listener.Accept()
+              if e!=nil { received<-false;return }
+              defer c.Close()
+              b:=make([]byte,5)
+              n,e:=c.Read(b)
+              received<-e==nil && string(b[:n])=="HELLO"
+            }()
+            conn,err:=net.DialTimeout("tcp4","127.0.0.1:19042",2*time.Second)
+            assert(err==nil,"LOOPBACK_CLIENT")
+            _,err=conn.Write([]byte("HELLO"))
+            conn.Close()
+            assert(err==nil && <-received,"LOCAL_ONLY_MESSAGE")
+            for _,p:=range []struct{network,address,label string}{
+              {"tcp4","192.0.2.1:443","OUTBOUND_IPV4_BLOCKED"},
+              {"tcp6","[2001:db8::1]:443","OUTBOUND_IPV6_BLOCKED"},
+            }{
+              c,e:=net.DialTimeout(p.network,p.address,2*time.Second)
+              if c!=nil {c.Close()}
+              assert(e!=nil && !strings.Contains(strings.ToLower(e.Error()),"connection refused"),p.label)
+            }
+            fmt.Println("FICTIONAL_CONTAINER_BOUNDARY_PROOF=PASS")
+          }
+          GO
+          cat > "$root/Dockerfile" <<'DOCKER'
+          FROM scratch
+          COPY --chown=10001:10001 proof /proof
+          COPY --chown=10001:10001 approved.txt /approved.txt
+          USER 10001:10001
+          ENTRYPOINT ["/proof"]
+          DOCKER
+          (
+            cd "$root"
+            export GOTOOLCHAIN=local GO111MODULE=off GOPROXY=off GOSUMDB=off CGO_ENABLED=0
+            go build -trimpath -buildvcs=false -o proof proof.go
+          )
+          echo "STATIC_SYNTHETIC_PROOF_BUILT_WITHOUT_DEPENDENCY_DOWNLOADS=PASS"
+          tag="clean-v1-fiction-proof:$GITHUB_RUN_ID"
+          name="clean-v1-fiction-$GITHUB_RUN_ID"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true; docker image rm "$tag" >/dev/null 2>&1 || true' EXIT
+          docker build --pull=false --network none -t "$tag" "$root"
+          docker run --name "$name" \
+            --network none --read-only --user 10001:10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 64 --memory 256m --cpus 1.0 \
+            --ipc private --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
+            --env "HOST_SYNTHETIC_PATH=$root/fictional-host-only.txt" \
+            "$tag"
+          python3 - "$name" <<'PY'
+          import json,subprocess,sys
+          d=json.loads(subprocess.check_output(["docker","inspect",sys.argv[1]],text=True))[0]
+          h=d["HostConfig"]
+          assert d["State"]["ExitCode"]==0
+          assert h["NetworkMode"]=="none"
+          assert h["ReadonlyRootfs"] is True
+          assert h["Privileged"] is False
+          assert "ALL" in h["CapDrop"]
+          assert "no-new-privileges" in h["SecurityOpt"]
+          assert h["Binds"] in (None,[])
+          assert h["Mounts"] in (None,[])
+          assert d["Mounts"]==[]
+          assert h["Devices"] in (None,[])
+          assert d["Config"]["User"]=="10001:10001"
+          assert "/tmp" in h["Tmpfs"]
+          assert h["PidsLimit"]==64
+          assert h["Memory"]==268435456
+          assert h["IpcMode"]=="private"
+          print("CONTAINER_INSPECT_NO_HOST_BIND_OR_VOLUME=PASS")
+          print("CONTAINER_INSPECT_NON_ROOT_READONLY_NO_NETWORK=PASS")
+          print("CONTAINER_INSPECT_LIMITS_NO_PRIVILEGE=PASS")
+          PY
+          echo "NO_REAL_OPENCLAW_RUN; NO_HOST_MAC_ACCESS; NO_MERGE; PRODUCTION_NO_GO"
