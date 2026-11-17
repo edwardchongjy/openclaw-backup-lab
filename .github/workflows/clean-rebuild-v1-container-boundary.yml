@@ -122,7 +122,7 @@ jobs:
           assert "ALL" in h["CapDrop"]
           assert "no-new-privileges" in h["SecurityOpt"]
           assert h["Binds"] in (None,[])
-          assert h["Mounts"] in (None,[])
+          assert h.get("Mounts") in (None,[])
           assert d["Mounts"]==[]
           assert h["Devices"] in (None,[])
           assert d["Config"]["User"]=="10001:10001"
