@@ -176,6 +176,7 @@ jobs:
               XDG_CACHE_HOME="$root/cache" OPENCLAW_HOME="$root/home" \
               OPENCLAW_STATE_DIR="$root/state" \
               OPENCLAW_CONFIG_PATH="$root/state/openclaw.json" \
+              OPENCLAW_GATEWAY_PORT=18991 OPENCLAW_GATEWAY_TOKEN=PUBLIC-CI-NOT-SECRET \
               OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 CI=true NO_COLOR=1 \
               pnpm -C "$upstream" openclaw "$@"
           }
@@ -189,6 +190,134 @@ jobs:
           print("REAL_OPENCLAW_AGENT_REGISTERED_WITHOUT_EGRESS=PASS",flush=True)
           PY
           echo "REAL_OPENCLAW_RESTRICTED_CLI=PASS"
+
+          # The single fictional model endpoint is also inside this exact no-route namespace.
+          runuser -u ci_real_agent -- python3 - "$root/state/openclaw.json" <<'PY'
+          import json,sys,pathlib
+          p=pathlib.Path(sys.argv[1])
+          cfg=json.loads(p.read_text())
+          cfg["models"]={
+              "mode":"replace",
+              "providers":{
+                "ci-fake":{
+                  "baseUrl":"http://127.0.0.1:19042/v1",
+                  "apiKey":"FICTIONAL-PLACEHOLDER-NOT-A-KEY",
+                  "api":"openai-completions",
+                  "models":[{
+                    "id":"fake-echo","name":"Fictional Loopback Only",
+                    "reasoning":False,"input":["text"],
+                    "contextWindow":32768,"maxTokens":256,
+                    "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+                    "compat":{"supportsTools":False,"supportsUsageInStreaming":False}
+                  }]
+                }
+              }
+          }
+          cfg.setdefault("agents",{}).setdefault("defaults",{})["model"]={"primary":"ci-fake/fake-echo"}
+          p.write_text(json.dumps(cfg,indent=2)+"\n")
+          print("RESTRICTED_FICTION_ONLY_MODEL_CONFIG=PASS",flush=True)
+          PY
+          oc config validate > "$root/state/validated.txt"
+          cat > "$root/fake-model.py" <<'PY'
+          import json,os,pathlib,sys
+          from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+          root=pathlib.Path(sys.argv[1])
+          assert os.getuid()!=0, "fictional provider must run unprivileged"
+          expected="CI_RESTRICTED_PING_20261117"
+          response="CI_RESTRICTED_FAKE_REPLY_20261117"
+          class H(BaseHTTPRequestHandler):
+              def log_message(self,*args): pass
+              def do_GET(self):
+                  if self.path!="/v1/models": self.send_error(404); return
+                  raw=json.dumps({"object":"list","data":[{"id":"fake-echo","object":"model","owned_by":"ci-fake"}]}).encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type","application/json")
+                  self.send_header("Content-Length",str(len(raw)))
+                  self.end_headers()
+                  self.wfile.write(raw)
+              def do_POST(self):
+                  if self.path!="/v1/chat/completions": self.send_error(404); return
+                  n=int(self.headers.get("Content-Length","0"))
+                  if n<=0 or n>2000000: self.send_error(413); return
+                  raw=self.rfile.read(n)
+                  doc=json.loads(raw)
+                  if doc.get("model")!="fake-echo" or expected not in raw.decode():
+                      self.send_error(422); return
+                  (root/"state/fake-model-hit.txt").write_text("FICTION_REQUEST_SEEN\n")
+                  chunks=[
+                    {"id":"ci-local","object":"chat.completion.chunk","created":1,"model":"fake-echo","choices":[{"index":0,"delta":{"role":"assistant","content":response},"finish_reason":None}]},
+                    {"id":"ci-local","object":"chat.completion.chunk","created":1,"model":"fake-echo","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+                  ]
+                  stream=("".join("data: "+json.dumps(chunk)+"\n\n" for chunk in chunks)+"data: [DONE]\n\n").encode()
+                  self.send_response(200)
+                  self.send_header("Content-Type","text/event-stream")
+                  self.send_header("Content-Length",str(len(stream)))
+                  self.end_headers()
+                  self.wfile.write(stream)
+                  self.wfile.flush()
+          ThreadingHTTPServer(("127.0.0.1",19042),H).serve_forever()
+          PY
+          chmod 0644 "$root/fake-model.py"
+          runuser -u ci_real_agent -- python3 "$root/fake-model.py" "$root" > "$root/state/fake-model.log" 2>&1 &
+          fake_pid=$!
+          gateway_pid=""
+          trap 'kill "$fake_pid" $gateway_pid 2>/dev/null || true; wait "$fake_pid" $gateway_pid 2>/dev/null || true' EXIT
+          fake_ready=0
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail --max-time 2 http://127.0.0.1:19042/v1/models > /dev/null; then fake_ready=1; break; fi
+            if ! kill -0 "$fake_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          test "$fake_ready" -eq 1
+          fake_lines="$(ss -ltnH '( sport = :19042 )')"
+          test -n "$fake_lines"
+          test -z "$(printf '%s\n' "$fake_lines" | grep -v '127.0.0.1:19042' || true)"
+          echo "RESTRICTED_FAKE_PROVIDER_LOCAL_ONLY=PASS"
+
+          # Entire Gateway + Agent turn uses the same restricted UID and network namespace.
+          oc gateway run --port 18991 --bind loopback --auth token \
+            --token PUBLIC-CI-NOT-SECRET > "$root/state/gateway.log" 2>&1 &
+          gateway_pid=$!
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --silent --fail --max-time 2 http://127.0.0.1:18991/healthz > /dev/null; then ready=1; break; fi
+            if ! kill -0 "$gateway_pid" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          if test "$ready" -ne 1; then
+            echo "RESTRICTED_GATEWAY_START=BLOCKED"
+            exit 1
+          fi
+          ss -ltnH '( sport = :18991 )' > "$root/state/gateway-listeners.txt"
+          python3 - "$root/state/gateway-listeners.txt" <<'PY'
+          import pathlib,sys
+          lines=pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert lines and all("127.0.0.1:18991" in s or "[::1]:18991" in s or "::1:18991" in s for s in lines)
+          print("RESTRICTED_GATEWAY_LOOPBACK_ONLY=PASS",flush=True)
+          PY
+          oc gateway health --port 18991 --token PUBLIC-CI-NOT-SECRET > "$root/state/health.txt"
+          if oc gateway health --port 18991 --token INVALID-CI-TOKEN > "$root/state/denied.txt" 2>&1; then
+            echo "RESTRICTED_GATEWAY_BAD_TOKEN=FAIL"; exit 1
+          fi
+          echo "RESTRICTED_GATEWAY_BAD_TOKEN_REJECTED=PASS"
+          oc gateway call agents.list --port 18991 --token PUBLIC-CI-NOT-SECRET --json > "$root/state/roster.json"
+          python3 - "$root/state/roster.json" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1]))
+          assert any(a.get("id")=="ci-restricted" for a in data.get("agents",[]))
+          print("RESTRICTED_GATEWAY_AGENT_VISIBLE=PASS",flush=True)
+          PY
+          oc agent --agent ci-restricted --message CI_RESTRICTED_PING_20261117 --json --timeout 90 > "$root/state/turn.json"
+          python3 - "$root/state/turn.json" "$root/state/fake-model-hit.txt" <<'PY'
+          import json,pathlib,sys
+          result=json.load(open(sys.argv[1]))
+          assert result.get("status")=="ok", "OpenClaw returned a non-OK turn"
+          answers=result.get("result",{}).get("payloads",[])
+          assert any(a.get("text")=="CI_RESTRICTED_FAKE_REPLY_20261117" for a in answers), "Unexpected fictional answer"
+          assert pathlib.Path(sys.argv[2]).read_text()=="FICTION_REQUEST_SEEN\n", "Fake provider did not receive the turn"
+          print("REAL_OPENCLAW_NO_EGRESS_COMPLETE_FAKE_TURN=PASS",flush=True)
+          PY
+          echo "FICTION_ONLY; NO_EXTERNAL_PROVIDER_OR_CHANNEL; PRODUCTION_NO_GO"
           SH
           sudo chown root:root "$root/isolated-run.sh"
           sudo chmod 0644 "$root/isolated-run.sh"
