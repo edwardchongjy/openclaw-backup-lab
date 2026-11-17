@@ -52,7 +52,7 @@ common=(--network none --read-only --user 10001:10001
   --pids-limit 256 --memory 3g --cpus 2 --ipc private
   --mount "type=volume,source=$vol_state,target=/home/ci"
   --mount "type=volume,source=$vol_offsite,target=/home/offsite"
-  --tmpfs /tmp:rw,nosuid,nodev,uid=10001,gid=10001,mode=1777,size=256m
+  --tmpfs /tmp:rw,nosuid,nodev,uid=10001,gid=10001,mode=1777,size=768m
   --env HOME=/home/ci --env TMPDIR=/tmp
   --env XDG_CONFIG_HOME=/home/ci/.config --env XDG_CACHE_HOME=/home/ci/cache
   --env OPENCLAW_HOME=/home/ci --env OPENCLAW_STATE_DIR=/home/ci/state
