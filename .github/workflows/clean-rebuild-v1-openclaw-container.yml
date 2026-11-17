@@ -1,0 +1,272 @@
+name: Clean Rebuild v1 - real OpenClaw in full fictional container
+on:
+  push:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths: [.github/workflows/clean-rebuild-v1-openclaw-container.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  actual-gateway-inside-no-egress-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Fetch pinned PUBLIC source with no stored Git credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - name: Pin Node on disposable build host
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.16.0"
+      - name: Build PUBLIC runtime before isolation, without private state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REPOSITORY" = edwardchongjy/openclaw-backup-lab
+          test "$GITHUB_REF" = refs/heads/lab/clean-rebuild-v1-gateway-backup-ci
+          test "$(id -u)" -ne 0
+          test "$(git -C upstream rev-parse HEAD)" = 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          node -e 'if(require("./upstream/package.json").version!=="2026.10.5")process.exit(1)'
+          node --version | grep -Fx v24.16.0
+          npm install --global pnpm@12.9.0
+          pnpm -C upstream install --frozen-lockfile
+          env -i PATH="$PATH" HOME=/tmp CI=true pnpm -C upstream openclaw --version
+          test -f upstream/dist/entry.js -o -f upstream/dist/entry.mjs
+          echo "PUBLIC_PINNED_RUNTIME_BUILD_PREPARED=PASS"
+      - name: Construct a full real OpenClaw image and prove its runtime isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY" = edwardchongjy/openclaw-backup-lab
+          test "$GITHUB_REF" = refs/heads/lab/clean-rebuild-v1-gateway-backup-ci
+          root="$RUNNER_TEMP/clean-v1-actual-container-$GITHUB_RUN_ID"
+          test ! -e "$root"
+          mkdir -m 0700 "$root"
+          printf 'EXTERNAL_FICTIONAL_MARKER_NOT_SECRET\n' > "$root/host-only-fixture.txt"
+          # The entire context is pinned public OpenClaw and fictional test scripts.
+          # Public dependencies were obtained in a disposable runner BEFORE isolation.
+          cat > upstream/ci-fake-provider.mjs <<'JS'
+          import fs from "node:fs";
+          import http from "node:http";
+          const expected="FULL_CONTAINER_PING_20261117";
+          const response="FULL_CONTAINER_FAKE_REPLY_20261117";
+          const json=(res,data)=>{
+            const raw=JSON.stringify(data);
+            res.writeHead(200,{"content-type":"application/json","content-length":Buffer.byteLength(raw)});
+            res.end(raw);
+          };
+          http.createServer(async(req,res)=>{
+            if(req.method==="GET"&&req.url==="/v1/models"){
+              return json(res,{object:"list",data:[{id:"fake-echo",object:"model",owned_by:"ci-fake"}]});
+            }
+            if(req.method!=="POST"||req.url!=="/v1/chat/completions"){
+              res.writeHead(404);res.end();return;
+            }
+            const parts=[];let total=0;
+            for await(const part of req){total+=part.length;if(total>2000000)break;parts.push(part);}
+            if(total>2000000){res.writeHead(413);res.end();return;}
+            let doc;
+            try{doc=JSON.parse(Buffer.concat(parts).toString("utf8"))}catch{res.writeHead(400);res.end();return}
+            if(doc.model!=="fake-echo"||!JSON.stringify(doc).includes(expected)){
+              res.writeHead(422);res.end();return;
+            }
+            fs.writeFileSync("/home/ci/state/fake-hit.txt","FICTION_PROVIDER_RECEIVED\n");
+            const chunks=[
+              {id:"ci-real-container",object:"chat.completion.chunk",created:1,model:"fake-echo",choices:[{index:0,delta:{role:"assistant",content:response},finish_reason:null}]},
+              {id:"ci-real-container",object:"chat.completion.chunk",created:1,model:"fake-echo",choices:[{index:0,delta:{},finish_reason:"stop"}]}
+            ];
+            const raw=chunks.map(x=>"data: "+JSON.stringify(x)+"\n\n").join("")+"data: [DONE]\n\n";
+            res.writeHead(200,{"content-type":"text/event-stream","content-length":Buffer.byteLength(raw)});
+            res.end(raw);
+          }).listen(19042,"127.0.0.1");
+          JS
+          cat > upstream/ci-container-pilot.mjs <<'JS'
+          import fs from "node:fs";
+          import assert from "node:assert/strict";
+          import {spawn,spawnSync} from "node:child_process";
+          import net from "node:net";
+          import {setTimeout as delay} from "node:timers/promises";
+          const HOME="/home/ci";
+          const SRC="/app/upstream";
+          const entry=SRC+"/openclaw.mjs";
+          const fake=SRC+"/ci-fake-provider.mjs";
+          const TRUE_RESPONSE="FULL_CONTAINER_FAKE_REPLY_20261117";
+          const env={
+            PATH:"/usr/local/bin:/usr/bin:/bin",HOME,
+            TMPDIR:"/tmp",XDG_CONFIG_HOME:HOME+"/.config",XDG_CACHE_HOME:HOME+"/cache",
+            OPENCLAW_HOME:HOME,OPENCLAW_STATE_DIR:HOME+"/state",
+            OPENCLAW_CONFIG_PATH:HOME+"/state/openclaw.json",
+            OPENCLAW_GATEWAY_PORT:"18991",OPENCLAW_GATEWAY_TOKEN:"PUBLIC-CI-FICTION-NOT-SECRET",
+            OPENCLAW_DISABLE_BUNDLED_PLUGINS:"1",CI:"true",NO_COLOR:"1",
+            NODE_DISABLE_COMPILE_CACHE:"1"
+          };
+          const trace=(name)=>console.log(name+"=PASS");
+          const children=[];
+          const exitChildren=()=>{for(const child of children){try{child.kill("SIGTERM")}catch{}}};
+          process.on("SIGTERM",exitChildren);
+          const run=(...args)=>{
+            const r=spawnSync(process.execPath,[entry,...args],{
+              env,cwd:SRC,encoding:"utf8",timeout:180000,maxBuffer:8*1024*1024
+            });
+            if(r.status!==0){
+              throw new Error("OpenClaw CLI "+args.slice(0,2).join(" ")+" failed: "+
+                String(r.error?.message||r.stderr||r.stdout).slice(-1000));
+            }
+            return r.stdout;
+          };
+          const fork=(cmd,args)=>{
+            let output="";
+            const child=spawn(cmd,args,{env,cwd:SRC,stdio:["ignore","pipe","pipe"]});
+            child.stdout.on("data",x=>{output=(output+x.toString()).slice(-20000)});
+            child.stderr.on("data",x=>{output=(output+x.toString()).slice(-20000)});
+            child.getOutput=()=>output;
+            children.push(child);return child;
+          };
+          const ready=async(url,child)=>{
+            for(let i=0;i<80;i++){
+              if(child.exitCode!==null)throw new Error("Service exited "+String(child.exitCode)+" "+child.getOutput().slice(-800));
+              try{const r=await fetch(url,{signal:AbortSignal.timeout(1800)});if(r.ok)return}catch{}
+              await delay(1500);
+            }
+            throw new Error("Service not ready "+url+" "+child.getOutput().slice(-1000));
+          };
+          const outbound=async(host,family)=>{
+            const err=await new Promise(resolve=>{
+              const s=net.connect({host,port:443,family,timeout:2500});
+              s.on("connect",()=>{s.destroy();resolve("CONNECTED")});
+              s.on("error",e=>{s.destroy();resolve(e.code||"OTHER")});
+              s.on("timeout",()=>{s.destroy();resolve("TIMEOUT")});
+            });
+            assert(["ENETUNREACH","EHOSTUNREACH","EAFNOSUPPORT","ENODEV"].includes(err),"outbound was not conclusively denied: "+err);
+          };
+          try{
+            assert.equal(process.getuid(),10001);trace("REAL_OPENCLAW_CONTAINER_NONROOT_UID");
+            assert.equal(process.versions.node,"24.16.0");trace("REAL_OPENCLAW_CONTAINER_PINNED_NODE");
+            assert(!fs.existsSync(process.env.HOST_ONLY_FICTION_PATH));trace("REAL_OPENCLAW_CONTAINER_HOST_MARKER_UNSEEN");
+            assert(!fs.existsSync("/var/run/docker.sock"));trace("REAL_OPENCLAW_CONTAINER_NO_DOCKER_SOCKET");
+            assert.throws(()=>fs.writeFileSync(SRC+"/ci-should-not-write.txt","BAD"));
+            trace("REAL_OPENCLAW_CONTAINER_READ_ONLY_SOURCE");
+            fs.mkdirSync(HOME+"/state",{recursive:true});
+            fs.mkdirSync(HOME+"/workspace",{recursive:true});
+            fs.mkdirSync(HOME+"/cache",{recursive:true});
+            fs.writeFileSync(HOME+"/state/fictional-proof.txt","FICTION_ONLY");
+            trace("REAL_OPENCLAW_CONTAINER_SCOPED_WRITABLE_STATE");
+            await outbound("192.0.2.1",4);trace("REAL_OPENCLAW_CONTAINER_IPV4_NO_EGRESS");
+            await outbound("2001:db8::1",6);trace("REAL_OPENCLAW_CONTAINER_IPV6_NO_EGRESS");
+            const version=run("--version");
+            assert(version.includes("2026.10.5"));trace("REAL_OPENCLAW_CONTAINER_VERSION");
+            run("setup","--baseline","--skip-bootstrap","--workspace",HOME+"/workspace","--json");
+            run("agents","add","ci-contained","--workspace",HOME+"/workspace/ci-contained","--non-interactive","--json");
+            const agents=JSON.parse(run("agents","list","--json"));
+            assert(Array.isArray(agents)&&agents.some(a=>a.id==="ci-contained"));
+            trace("REAL_OPENCLAW_CONTAINER_AGENT_REGISTERED");
+            const configPath=env.OPENCLAW_CONFIG_PATH;
+            const c=JSON.parse(fs.readFileSync(configPath,"utf8"));
+            c.models={mode:"replace",providers:{"ci-fake":{
+              baseUrl:"http://127.0.0.1:19042/v1",
+              apiKey:"FICTIONAL-PLACEHOLDER-NOT-A-KEY",api:"openai-completions",
+              models:[{id:"fake-echo",name:"Isolated Fake Provider",
+                reasoning:false,input:["text"],contextWindow:32768,maxTokens:256,
+                cost:{input:0,output:0,cacheRead:0,cacheWrite:0},
+                compat:{supportsTools:false,supportsUsageInStreaming:false}}]
+            }}};
+            if(!c.agents)c.agents={};
+            if(!c.agents.defaults)c.agents.defaults={};
+            c.agents.defaults.model={primary:"ci-fake/fake-echo"};
+            fs.writeFileSync(configPath,JSON.stringify(c,null,2)+"\n");
+            run("config","validate");trace("REAL_OPENCLAW_CONTAINER_FICTION_MODEL_ONLY");
+            const provider=fork(process.execPath,[fake]);
+            await ready("http://127.0.0.1:19042/v1/models",provider);
+            trace("REAL_OPENCLAW_CONTAINER_FAKE_PROVIDER_LOOPBACK");
+            const gateway=fork(process.execPath,[entry,"gateway","run","--port","18991",
+              "--bind","loopback","--auth","token","--token",env.OPENCLAW_GATEWAY_TOKEN]);
+            await ready("http://127.0.0.1:18991/healthz",gateway);
+            trace("REAL_OPENCLAW_CONTAINER_GATEWAY_READY");
+            run("gateway","health","--port","18991","--token",env.OPENCLAW_GATEWAY_TOKEN);
+            const bad=spawnSync(process.execPath,[entry,"gateway","health","--port","18991",
+              "--token","INCORRECT-FICTIONAL-TOKEN"],{cwd:SRC,env,timeout:60000,encoding:"utf8"});
+            assert.notEqual(bad.status,0);trace("REAL_OPENCLAW_CONTAINER_BAD_TOKEN_REJECTED");
+            const roster=JSON.parse(run("gateway","call","agents.list","--port","18991",
+              "--token",env.OPENCLAW_GATEWAY_TOKEN,"--json"));
+            assert(roster.agents.some(a=>a.id==="ci-contained"));
+            trace("REAL_OPENCLAW_CONTAINER_GATEWAY_AGENT_VISIBLE");
+            const reply=JSON.parse(run("agent","--agent","ci-contained",
+              "--message","FULL_CONTAINER_PING_20261117","--json","--timeout","90"));
+            const texts=reply.result?.payloads??[];
+            assert.equal(reply.status,"ok");
+            assert(texts.some(x=>x.text===TRUE_RESPONSE),"Agent returned a different answer");
+            assert.equal(fs.readFileSync(HOME+"/state/fake-hit.txt","utf8"),"FICTION_PROVIDER_RECEIVED\n");
+            trace("REAL_OPENCLAW_FULL_CONTAINER_FAKE_TURN");
+            console.log("SYNTHETIC_ONLY; NO_REAL_PROVIDER; NO_OUTSIDE_NETWORK; PRODUCTION_NO_GO");
+          }finally{
+            exitChildren();
+          }
+          JS
+          cat > upstream/Dockerfile.ci-full <<'DOCKER'
+          FROM node:24.16.0-bookworm-slim
+          WORKDIR /app/upstream
+          COPY --chown=10001:10001 . /app/upstream
+          USER 10001:10001
+          ENTRYPOINT ["node","/app/upstream/ci-container-pilot.mjs"]
+          DOCKER
+          cat > upstream/.dockerignore <<'IGNORE'
+          .git
+          .github
+          **/.git
+          **/.cache
+          *.log
+          IGNORE
+
+          docker pull node:24.16.0-bookworm-slim
+          base_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' node:24.16.0-bookworm-slim)"
+          test -n "$base_digest"
+          echo "PUBLIC_BASE_IMAGE_RESOLVED_TO_DIGEST=PASS"
+          echo "PUBLIC_BASE_IMAGE_DIGEST=$base_digest"
+          tag="clean-v1-actual-openclaw:$GITHUB_RUN_ID"
+          name="clean-v1-actual-openclaw-$GITHUB_RUN_ID"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true; docker image rm "$tag" >/dev/null 2>&1 || true' EXIT
+          docker build --network none --pull=false -f upstream/Dockerfile.ci-full -t "$tag" upstream
+          test -n "$(docker image inspect --format '{{.Id}}' "$tag")"
+          echo "FICTIONAL_PUBLIC_RUNTIME_IMAGE_BUILT=PASS"
+          docker run --name "$name" \
+            --network none --read-only --user 10001:10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 256 --memory 3g --cpus 2 \
+            --ipc private --tmpfs /home/ci:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=256m \
+            --tmpfs /tmp:rw,nosuid,nodev,uid=10001,gid=10001,mode=1777,size=128m \
+            --env "HOST_ONLY_FICTION_PATH=$root/host-only-fixture.txt" \
+            "$tag"
+          python3 - "$name" <<'PY'
+          import json,subprocess,sys
+          d=json.loads(subprocess.check_output(["docker","inspect",sys.argv[1]],text=True))[0]
+          h=d["HostConfig"]
+          assert d["State"]["ExitCode"]==0
+          assert h["NetworkMode"]=="none"
+          assert h["ReadonlyRootfs"] is True
+          assert h["Privileged"] is False
+          assert "ALL" in h["CapDrop"]
+          assert "no-new-privileges" in h["SecurityOpt"]
+          assert h["Binds"] in (None,[])
+          assert h.get("Mounts") in (None,[])
+          assert d["Mounts"]==[]
+          assert h["Devices"] in (None,[])
+          assert d["Config"]["User"]=="10001:10001"
+          assert "/home/ci" in h["Tmpfs"] and "/tmp" in h["Tmpfs"]
+          assert h["PidsLimit"]==256
+          assert h["IpcMode"]=="private"
+          assert h["Memory"]==3221225472
+          assert h.get("PortBindings") in (None,{})
+          print("REAL_OPENCLAW_CONTAINER_NO_HOST_MOUNTS=PASS")
+          print("REAL_OPENCLAW_CONTAINER_NO_EGRESS_NONROOT_READONLY=PASS")
+          print("REAL_OPENCLAW_CONTAINER_LIMITS_AND_TMPFS=PASS")
+          PY
+          echo "FULL_ACTUAL_OPENCLAW_CONTAINER_SYNTHETIC_PILOT=PASS"
+          echo "NEVER_DEPLOYED; NO_MAC_MINI; NO_REAL_ACCOUNTS; NO_MERGE; G0_G7_NO_GO"
