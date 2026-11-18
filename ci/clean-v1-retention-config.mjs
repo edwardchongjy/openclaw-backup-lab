@@ -40,20 +40,20 @@ if(mode==="configure"){
   }
 }else if(mode==="seed-retention"){
   const dir=path.join(store,"backups",ns);
-  const keys=fs.readdirSync(dir).filter(x=>/^\\d{8}T\\d{6}Z-[a-f0-9]{8}\\.tar\\.gz$/.test(x));
+  const keys=fs.readdirSync(dir).filter(x=>/^\d{8}T\d{6}Z-[a-f0-9]{8}\.tar\.gz$/.test(x));
   assert.equal(keys.length,1,"Expected exactly one original archive before retention");
-  fs.writeFileSync(path.join(dir,"keep-nonbackup.txt"),"FAKE_NONBACKUP_NOTE\\n");
+  fs.writeFileSync(path.join(dir,"keep-nonbackup.txt"),"FAKE_NONBACKUP_NOTE\n");
   const other=path.join(store,"backups","ci-unrelated-fiction");
   fs.mkdirSync(other,{recursive:true});
-  fs.writeFileSync(path.join(other,"20260101T000000Z-aaaaaaaa.tar.gz"),"FAKE_OTHER_NAMESPACE\\n");
+  fs.writeFileSync(path.join(other,"20260101T000000Z-aaaaaaaa.tar.gz"),"FAKE_OTHER_NAMESPACE\n");
   console.log("FICTION_RETENTION_SEEDED=PASS");
 }else if(mode==="assert-retention"){
   const dir=path.join(store,"backups",ns);
-  const keys=fs.readdirSync(dir).filter(x=>/^\\d{8}T\\d{6}Z-[a-f0-9]{8}\\.tar\\.gz$/.test(x));
+  const keys=fs.readdirSync(dir).filter(x=>/^\d{8}T\d{6}Z-[a-f0-9]{8}\.tar\.gz$/.test(x));
   assert.equal(keys.length,1,"Retention failed to leave exactly newest archive from UTC day");
   assert(fs.existsSync(path.join(dir,"owner.json")),"Owner claim was deleted");
-  assert.equal(fs.readFileSync(path.join(dir,"keep-nonbackup.txt"),"utf8"),"FAKE_NONBACKUP_NOTE\\n","Non-backup key deleted or overwritten");
-  assert.equal(fs.readFileSync(path.join(store,"backups","ci-unrelated-fiction","20260101T000000Z-aaaaaaaa.tar.gz"),"utf8"),"FAKE_OTHER_NAMESPACE\\n","Other namespace modified");
+  assert.equal(fs.readFileSync(path.join(dir,"keep-nonbackup.txt"),"utf8"),"FAKE_NONBACKUP_NOTE\n","Non-backup key deleted or overwritten");
+  assert.equal(fs.readFileSync(path.join(store,"backups","ci-unrelated-fiction","20260101T000000Z-aaaaaaaa.tar.gz"),"utf8"),"FAKE_OTHER_NAMESPACE\n","Other namespace modified");
   console.log("NATIVE_RETENTION_NEWEST_ONLY_OWNER_AND_UNRELATED_OBJECTS_PRESERVED=PASS");
 }else{
   throw Error("Unknown fictional storage test mode");
