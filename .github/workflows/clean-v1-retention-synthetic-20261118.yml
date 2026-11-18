@@ -1,0 +1,47 @@
+name: Clean Rebuild v1 - isolated retention with fictional archives
+on:
+  push:
+    branches: [lab/retention-synthetic-20261118]
+    paths:
+      - .github/workflows/clean-v1-retention-synthetic-20261118.yml
+      - ci/clean-v1-retention-driver.sh
+      - ci/clean-v1-retention-config.mjs
+      - ci/clean-v1-offsite.Dockerfile
+      - ci/clean-v1-crossrunner-pilot.mjs
+      - ci/clean-v1-crossrunner-fake-provider.mjs
+  pull_request:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths:
+      - .github/workflows/clean-v1-retention-synthetic-20261118.yml
+      - ci/clean-v1-retention-driver.sh
+      - ci/clean-v1-retention-config.mjs
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-encryption-on-new-fictional-volumes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact PUBLIC candidate, no persisted token
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: lab
+          persist-credentials: false
+      - name: Checkout pinned PUBLIC upstream OpenClaw
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: openclaw/openclaw
+          ref: 1b58cb9a1b4f4353e1add63c8506db4d890962e8
+          path: upstream
+          persist-credentials: false
+      - name: Set up Node 24.16.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.16.0"
+      - name: Run complete real OpenClaw fake-only native encrypted offsite backup denial tests
+        shell: bash
+        env:
+          CI_FICTIONAL_PASSPHRASE: PUBLIC_LAB_KEY_NOT_SECRET_DO_NOT_USE_FOR_REAL_OPENCLAW
+        run: bash lab/ci/clean-v1-retention-driver.sh
