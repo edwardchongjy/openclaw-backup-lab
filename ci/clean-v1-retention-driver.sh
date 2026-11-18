@@ -110,6 +110,20 @@ cli backup verify --from ciarchive --namespace ci-fresh-fiction latest
 config assert-retention
 cli storage test ciarchive
 echo "NATIVE_OFFSITE_RETENTION_SAME_DAY=PASS"
+config seed-crossdate
+cli backup create --to ciarchive --namespace ci-fresh-fiction --keep-daily 7 --keep-weekly 4 --keep-monthly 12
+config assert-crossdate
+cli backup verify --from ciarchive --namespace ci-fresh-fiction latest
+old_key="$(config old-key)"
+test -n "$old_key"
+cli backup verify --from ciarchive --namespace ci-fresh-fiction "$old_key"
+docker run --rm ${common[@]} --entrypoint sh "$tag" -ec '
+  node /app/upstream/openclaw.mjs backup restore --from ciarchive \
+    --namespace ci-fresh-fiction "$1" --target /tmp/fictional-historical
+  test -n "$(find /tmp/fictional-historical -type f -print -quit)"
+  echo "NATIVE_CROSSDATE_HISTORICAL_CIPHERTEXT_RESTORE=PASS"
+' sh "$old_key"
+echo "NATIVE_CROSSDATE_RETENTION_AND_RESTORE=PASS"
 wrong_log="$RUNNER_TEMP/clean-v1-wrong-key-$GITHUB_RUN_ID.log"
 if wrong_key_cli storage test ciarchive >"$wrong_log" 2>&1; then
   echo "WRONG_PASSPHRASE_WAS_ACCEPTED=FAIL"
