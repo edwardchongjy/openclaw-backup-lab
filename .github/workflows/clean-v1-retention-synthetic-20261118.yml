@@ -9,6 +9,12 @@ on:
       - ci/clean-v1-offsite.Dockerfile
       - ci/clean-v1-crossrunner-pilot.mjs
       - ci/clean-v1-crossrunner-fake-provider.mjs
+  pull_request:
+    branches: [lab/clean-rebuild-v1-gateway-backup-ci]
+    paths:
+      - .github/workflows/clean-v1-retention-synthetic-20261118.yml
+      - ci/clean-v1-retention-driver.sh
+      - ci/clean-v1-retention-config.mjs
   workflow_dispatch:
 permissions:
   contents: read
