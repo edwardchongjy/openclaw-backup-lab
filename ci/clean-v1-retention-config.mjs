@@ -105,7 +105,13 @@ if(mode==="configure"){
   const manifest=JSON.parse(fs.readFileSync(path.join(dir,"crossdate-fixture.json"),"utf8"));
   const rx=/^\d{8}T\d{6}Z-[a-f0-9]{8}\.tar\.gz$/;
   const actual=fs.readdirSync(dir).filter(k=>rx.test(k)).sort();
-  assert.deepEqual(actual,manifest.expectedKept.slice().sort(),"Native UTC calendar retention mismatch");
+  const seeded=new Set([...manifest.expectedKept,...manifest.expectedDeleted]);
+  const newlyCreated=actual.filter(k=>!seeded.has(k));
+  assert.equal(newlyCreated.length,1,"Exactly one fresh OpenClaw encrypted backup should be created");
+  assert(newlyCreated[0]>manifest.newest,"Newly created archive must be newer than seed");
+  const expected=[...manifest.expectedKept.filter(k=>k!==manifest.newest),newlyCreated[0]].sort();
+  assert.deepEqual(actual,expected,"Native UTC calendar retention mismatch");
+  assert(!fs.existsSync(path.join(dir,manifest.newest)),"Superseded same-day snapshot was not pruned");
   assert(manifest.expectedDeleted.every(k=>!fs.existsSync(path.join(dir,k))));
   assert(fs.existsSync(path.join(dir,"owner.json")));
   assert.equal(fs.readFileSync(path.join(dir,"keep-nonbackup.txt"),"utf8"),"FAKE_NONBACKUP_NOTE\n");
