@@ -4,7 +4,13 @@ umask 077
 test "$RUNNER_ENVIRONMENT" = github-hosted
 test "$RUNNER_OS" = Linux
 test "$GITHUB_REPOSITORY" = edwardchongjy/openclaw-backup-lab
-test "$GITHUB_REF" = refs/heads/lab/retention-synthetic-20261118
+if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+  test "$GITHUB_BASE_REF" = lab/clean-rebuild-v1-gateway-backup-ci
+  test "$GITHUB_HEAD_REF" = lab/retention-synthetic-20261118
+  case "$GITHUB_REF" in refs/pull/*/merge) ;; *) exit 1 ;; esac
+else
+  test "$GITHUB_REF" = refs/heads/lab/retention-synthetic-20261118
+fi
 test "$(id -u)" -ne 0
 test "$(git -C lab rev-parse HEAD)" = "$GITHUB_SHA"
 test "$(git -C upstream rev-parse HEAD)" = 1b58cb9a1b4f4353e1add63c8506db4d890962e8
