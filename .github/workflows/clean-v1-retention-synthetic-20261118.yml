@@ -3,7 +3,7 @@ on:
   push:
     branches: [lab/retention-synthetic-20261118]
     paths:
-      - .github/workflows/clean-rebuild-v1-native-encrypted-backup.yml
+      - .github/workflows/clean-v1-retention-synthetic-20261118.yml
       - ci/clean-v1-retention-driver.sh
       - ci/clean-v1-retention-config.mjs
       - ci/clean-v1-offsite.Dockerfile
